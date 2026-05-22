@@ -42,6 +42,9 @@ type PeerTestManager struct {
 
 	// mutex protects all fields
 	mutex sync.RWMutex
+
+	// stopCh is closed by Stop() to signal the cleanup goroutine to exit.
+	stopCh chan struct{}
 }
 
 // PeerTestRole represents the role of a peer in the test.
@@ -244,10 +247,33 @@ type TestResult struct {
 // Returns a new PeerTestManager with empty state.
 func NewPeerTestManager(listener ListenerRef) *PeerTestManager {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "NewPeerTestManager"}).Debug("Creating new PeerTestManager")
-	return &PeerTestManager{
+	ptm := &PeerTestManager{
 		listener: listener,
 		tests:    make(map[uint32]*PeerTest),
 		results:  make(map[string]*TestResult),
+		stopCh:   make(chan struct{}),
+	}
+	go ptm.cleanupLoop()
+	return ptm
+}
+
+// Stop halts the background cleanup goroutine. Call when the manager is
+// no longer needed to avoid goroutine leaks.
+func (ptm *PeerTestManager) Stop() {
+	close(ptm.stopCh)
+}
+
+// cleanupLoop periodically removes expired peer tests.
+func (ptm *PeerTestManager) cleanupLoop() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			ptm.CleanupExpired()
+		case <-ptm.stopCh:
+			return
+		}
 	}
 }
 
@@ -278,32 +304,35 @@ func (ptm *PeerTestManager) InitiatePeerTest(bobAddr *net.UDPAddr) (uint32, erro
 			Errorf("bob address has invalid source port %d", bobAddr.Port)
 	}
 
-	// Generate cryptographically random nonce
-	var nonceBytes [4]byte
-	if _, err := rand.Read(nonceBytes[:]); err != nil {
-		return 0, oops.
-			Code("RANDOM_GENERATION_FAILED").
-			In("peertest_manager").
-			With("error", err.Error()).
-			Errorf("failed to generate nonce: %w", err)
-	}
-	nonce := binary.BigEndian.Uint32(nonceBytes[:])
-
-	// Avoid zero nonce
-	if nonce == 0 {
-		nonce = 1
-	}
+	var nonce uint32
 
 	ptm.mutex.Lock()
 	defer ptm.mutex.Unlock()
 
-	// Check for duplicate nonce
-	if _, exists := ptm.tests[nonce]; exists {
-		return 0, oops.
-			Code("DUPLICATE_NONCE").
-			In("peertest_manager").
-			With("nonce", nonce).
-			Errorf("nonce already in use")
+	// Retry nonce generation on collision (extremely unlikely but safe).
+	const maxRetries = 10
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		var nonceBytes [4]byte
+		if _, err := rand.Read(nonceBytes[:]); err != nil {
+			return 0, oops.
+				Code("RANDOM_GENERATION_FAILED").
+				In("peertest_manager").
+				With("error", err.Error()).
+				Errorf("failed to generate nonce: %w", err)
+		}
+		nonce = binary.BigEndian.Uint32(nonceBytes[:])
+		if nonce == 0 {
+			nonce = 1
+		}
+		if _, exists := ptm.tests[nonce]; !exists {
+			break
+		}
+		if attempt == maxRetries-1 {
+			return 0, oops.
+				Code("NONCE_EXHAUSTED").
+				In("peertest_manager").
+				Errorf("failed to generate unique nonce after %d attempts", maxRetries)
+		}
 	}
 
 	// Derive deterministic connection IDs from nonce per spec
@@ -469,7 +498,7 @@ func (ptm *PeerTestManager) CompleteTest(nonce uint32, result *TestResult) error
 //
 // Returns error if test not found.
 func (ptm *PeerTestManager) FailTest(nonce uint32, reason error) error {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "FailTest", "nonce": nonce}).Debug("Failing peer test")
+	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "FailTest", "nonce": nonce, "reason": reason}).Debug("Failing peer test")
 	return ptm.withTest(nonce, func(test *PeerTest) {
 		test.State = TestFailed
 	})
@@ -532,6 +561,10 @@ func (ptm *PeerTestManager) CleanupExpired() {
 	for nonce, test := range ptm.tests {
 		// Check if test has timed out (60 seconds per I2P spec)
 		if now.Sub(test.StartTime) > 60*time.Second {
+			// Also remove the corresponding result entry keyed by AliceAddr.
+			if test.AliceAddr != nil {
+				delete(ptm.results, test.AliceAddr.String())
+			}
 			delete(ptm.tests, nonce)
 		}
 	}
@@ -753,7 +786,11 @@ func (ptm *PeerTestManager) DetermineNATType(result *TestResult) NATType {
 	// Both probes succeeded
 	if result.DirectProbeSuccess && result.RelayedProbeSuccess {
 		if result.PortConsistent && result.IPConsistent {
-			// Likely no NAT or full cone NAT
+			// Check whether the observed external address matches a local interface.
+			// If it does, the peer has a public IP with no NAT; otherwise full cone NAT.
+			if result.ExternalAddr != nil && isLocalAddress(result.ExternalAddr.IP) {
+				return NATNone
+			}
 			return NATCone
 		}
 		if !result.PortConsistent {

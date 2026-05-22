@@ -12,7 +12,13 @@ import (
 	"github.com/samber/oops"
 )
 
-// RelayResponseTokenTTL is the maximum lifetime for a relay response token.\n// Per SSU2 spec, \"The token must be used immediately by Alice in the Session Request.\"\n// We enforce a 10-second window to allow for network latency while still\n// requiring near-immediate use.\nconst RelayResponseTokenTTL = 10 * time.Second\n\n// RelayManager manages relay connections and introducer services for NAT traversal.
+// RelayResponseTokenTTL is the maximum lifetime for a relay response token.
+// Per SSU2 spec, "The token must be used immediately by Alice in the Session Request."
+// We enforce a 10-second window to allow for network latency while still
+// requiring near-immediate use.
+const RelayResponseTokenTTL = 10 * time.Second
+
+// RelayManager manages relay connections and introducer services for NAT traversal.
 // It handles relay tag allocation, introducer registration, and relay request processing.
 //
 // Design rationale:
@@ -40,6 +46,9 @@ type RelayManager struct {
 
 	// cleanupTimer periodically removes expired entries
 	cleanupTimer *time.Timer
+
+	// stopped is set by Stop() to prevent writes to nil maps after shutdown
+	stopped bool
 }
 
 // IntroducerInfo represents an available introducer for NAT traversal.
@@ -126,6 +135,7 @@ func (rm *RelayManager) Stop() {
 	}
 
 	// Clear all state
+	rm.stopped = true
 	rm.introducers = nil
 	rm.relayTags = nil
 	rm.pendingSessions = nil
@@ -273,6 +283,13 @@ func (rm *RelayManager) AllocateRelayTag(addr *net.UDPAddr) (uint32, error) {
 	rm.mutex.Lock()
 	defer rm.mutex.Unlock()
 
+	if rm.stopped {
+		return 0, oops.
+			Code("MANAGER_STOPPED").
+			In("relay_manager").
+			Errorf("relay manager has been stopped")
+	}
+
 	const maxAttempts = 3
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		var tag uint32
@@ -393,6 +410,13 @@ func (rm *RelayManager) AddPendingSession(sessionID uint64, remoteAddr, introduc
 	rm.mutex.Lock()
 	defer rm.mutex.Unlock()
 
+	if rm.stopped {
+		return oops.
+			Code("MANAGER_STOPPED").
+			In("relay_manager").
+			Errorf("relay manager has been stopped")
+	}
+
 	rm.pendingSessions[sessionID] = &PendingSession{
 		SessionID:      sessionID,
 		RemoteAddr:     remoteAddr,
@@ -421,14 +445,21 @@ func (rm *RelayManager) GetPendingSession(sessionID uint64) *PendingSession {
 	}
 
 	// Return defensive copy
-	return &PendingSession{
-		SessionID:      session.SessionID,
-		RemoteAddr:     session.RemoteAddr,
-		IntroducerAddr: session.IntroducerAddr,
-		RelayTag:       session.RelayTag,
-		CreatedAt:      session.CreatedAt,
-		Retries:        session.Retries,
+	copy := &PendingSession{
+		SessionID: session.SessionID,
+		RelayTag:  session.RelayTag,
+		CreatedAt: session.CreatedAt,
+		Retries:   session.Retries,
 	}
+	if session.RemoteAddr != nil {
+		addrCopy := *session.RemoteAddr
+		copy.RemoteAddr = &addrCopy
+	}
+	if session.IntroducerAddr != nil {
+		addrCopy := *session.IntroducerAddr
+		copy.IntroducerAddr = &addrCopy
+	}
+	return copy
 }
 
 // RemovePendingSession removes a pending session.
@@ -529,21 +560,31 @@ func (rm *RelayManager) GetListener() ListenerRef {
 func (rm *RelayManager) GetAllIntroducers() []*IntroducerInfo {
 	rm.mutex.RLock()
 	defer rm.mutex.RUnlock()
-	return rm.introducers
+	result := make([]*IntroducerInfo, len(rm.introducers))
+	copy(result, rm.introducers)
+	return result
 }
 
-// GetRelayTagsMap returns the relay tags map (for testing).
+// GetRelayTagsMap returns a copy of the relay tags map (for testing).
 func (rm *RelayManager) GetRelayTagsMap() map[uint32]*RelayTag {
 	rm.mutex.RLock()
 	defer rm.mutex.RUnlock()
-	return rm.relayTags
+	result := make(map[uint32]*RelayTag, len(rm.relayTags))
+	for k, v := range rm.relayTags {
+		result[k] = v
+	}
+	return result
 }
 
-// GetPendingSessionsMap returns the pending sessions map (for testing).
+// GetPendingSessionsMap returns a copy of the pending sessions map (for testing).
 func (rm *RelayManager) GetPendingSessionsMap() map[uint64]*PendingSession {
 	rm.mutex.RLock()
 	defer rm.mutex.RUnlock()
-	return rm.pendingSessions
+	result := make(map[uint64]*PendingSession, len(rm.pendingSessions))
+	for k, v := range rm.pendingSessions {
+		result[k] = v
+	}
+	return result
 }
 
 // SetRelayTagExpiry sets the expiry of a relay tag (for testing).

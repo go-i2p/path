@@ -316,13 +316,16 @@ func (ir *IntroducerRegistry) copyIntroducer(intro *RegisteredIntroducer) *Regis
 	}
 
 	result := &RegisteredIntroducer{
-		Addr:       intro.Addr,
 		RouterHash: make([]byte, len(intro.RouterHash)),
 		StaticKey:  make([]byte, len(intro.StaticKey)),
 		IntroKey:   make([]byte, len(intro.IntroKey)),
 		RelayTag:   intro.RelayTag,
 		AddedAt:    intro.AddedAt,
 		LastSeen:   intro.LastSeen,
+	}
+	if intro.Addr != nil {
+		addrCopy := *intro.Addr
+		result.Addr = &addrCopy
 	}
 
 	copy(result.RouterHash, intro.RouterHash)

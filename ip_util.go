@@ -69,3 +69,31 @@ func signData(privateKey ed25519.PrivateKey, data []byte) []byte {
 func verifyData(publicKey ed25519.PublicKey, data, signature []byte) bool {
 	return ed25519.Verify(publicKey, data, signature)
 }
+
+// isLocalAddress reports whether ip is assigned to a local network interface.
+// Used by DetermineNATType to distinguish NATNone from NATCone.
+func isLocalAddress(ip net.IP) bool {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var localIP net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				localIP = v.IP
+			case *net.IPAddr:
+				localIP = v.IP
+			}
+			if localIP != nil && localIP.Equal(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}

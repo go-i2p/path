@@ -694,9 +694,9 @@ func TestHolePunchCoordinator_HandleHolePunch_WithSignatureVerification(t *testi
 	hpc := createTestHolePunchCoordinator(t)
 
 	// Set up a verifier that accepts all
-	hpc.VerifyHolePunchSignature = func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
+	hpc.SetVerifyHolePunchSignature(func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
 		return nil
-	}
+	})
 
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8887}
 	introducerAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.2"), Port: 8888}
@@ -723,11 +723,11 @@ func TestHolePunchCoordinator_HandleHolePunch_SignatureVerificationFails(t *test
 	hpc := createTestHolePunchCoordinator(t)
 
 	// Set up a verifier that rejects
-	hpc.VerifyHolePunchSignature = func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
+	hpc.SetVerifyHolePunchSignature(func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
 		return oops.
 			Code("BAD_SIGNATURE").
 			Errorf("invalid signature")
-	}
+	})
 
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8887}
 	introducerAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.2"), Port: 8888}

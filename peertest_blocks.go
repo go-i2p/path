@@ -192,7 +192,6 @@ func EncodePeerTestBlock(block *PeerTestBlock) (*SSU2Block, error) {
 }
 
 // DecodePeerTestBlock decodes a PeerTest block from wire format per the SSU2 spec.
-// DecodePeerTestBlock decodes a PeerTest block from wire format per the SSU2 spec.
 func DecodePeerTestBlock(ssu2Block *SSU2Block) (*PeerTestBlock, error) {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "DecodePeerTestBlock"}).Debug("Decoding peer test block")
 	if ssu2Block == nil {

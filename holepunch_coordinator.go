@@ -2,6 +2,8 @@ package path
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/binary"
 	"net"
 	"sync"
 	"time"
@@ -33,10 +35,14 @@ type HolePunchCoordinator struct {
 	// attempts maps session ID to hole punch attempt
 	attempts map[uint64]*HolePunchAttempt
 
-	// VerifyHolePunchSignature is called to verify incoming HolePunch messages.
+	// verifyHolePunchSignature is called to verify incoming HolePunch messages.
 	// Per SSU2 spec §Hole Punch, messages transiting through a relay MUST be
 	// authenticated cryptographically. If nil, incoming messages are rejected.
-	VerifyHolePunchSignature func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error
+	// Set via SetVerifyHolePunchSignature to ensure thread safety.
+	verifyHolePunchSignatureFn func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error
+
+	// stopCh is closed by Stop() to signal the cleanup goroutine to exit.
+	stopCh chan struct{}
 
 	// mutex protects all fields
 	mutex sync.RWMutex
@@ -112,9 +118,32 @@ func (s HolePunchState) String() string {
 // Returns a new HolePunchCoordinator with empty state.
 func NewHolePunchCoordinator(manager *RelayManager) *HolePunchCoordinator {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "NewHolePunchCoordinator"}).Debug("Creating new HolePunchCoordinator")
-	return &HolePunchCoordinator{
+	hpc := &HolePunchCoordinator{
 		manager:  manager,
 		attempts: make(map[uint64]*HolePunchAttempt),
+		stopCh:   make(chan struct{}),
+	}
+	go hpc.cleanupLoop()
+	return hpc
+}
+
+// Stop halts the background cleanup goroutine. Call when the coordinator
+// is no longer needed to avoid goroutine leaks.
+func (hpc *HolePunchCoordinator) Stop() {
+	close(hpc.stopCh)
+}
+
+// cleanupLoop periodically removes expired hole punch attempts.
+func (hpc *HolePunchCoordinator) cleanupLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			hpc.CleanupExpired()
+		case <-hpc.stopCh:
+			return
+		}
 	}
 }
 
@@ -155,9 +184,19 @@ func (hpc *HolePunchCoordinator) InitiateHolePunch(remoteAddr, introducerAddr *n
 			Errorf("relay tag cannot be zero")
 	}
 
-	// Derive connection IDs deterministically from relay nonce per spec:
-	// dest = (uint64(nonce) << 32) | uint64(nonce), src = ^dest
-	destConnID, _ := NonceConnectionIDs(relayTag)
+	// Generate a cryptographically random session ID to prevent collisions
+	// when the same relay tag is reused across retry attempts.
+	var sessionIDBuf [8]byte
+	if _, err := rand.Read(sessionIDBuf[:]); err != nil {
+		return 0, oops.
+			Code("SESSION_ID_GENERATION_FAILED").
+			In("holepunch_coordinator").
+			Wrapf(err, "failed to generate session ID")
+	}
+	destConnID := binary.BigEndian.Uint64(sessionIDBuf[:])
+	if destConnID == 0 {
+		destConnID = 1
+	}
 
 	hpc.mutex.Lock()
 	defer hpc.mutex.Unlock()
@@ -238,20 +277,28 @@ func (hpc *HolePunchCoordinator) SendHolePunch(sessionID uint64, targetAddr *net
 	return nil
 }
 
-// verifyHolePunchSignature validates the block signature using the
+// SetVerifyHolePunchSignature sets the signature verification function.
+// This method is thread-safe; use it instead of assigning the field directly.
+func (hpc *HolePunchCoordinator) SetVerifyHolePunchSignature(fn func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error) {
+	hpc.mutex.Lock()
+	defer hpc.mutex.Unlock()
+	hpc.verifyHolePunchSignatureFn = fn
+}
+
+// verifyHolePunchSignatureInternal validates the block signature using the
 // configured verifier. Returns nil if block is nil (legacy callers).
 func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
 	if block == nil {
 		return nil
 	}
-	if hpc.VerifyHolePunchSignature == nil {
+	if hpc.verifyHolePunchSignatureFn == nil {
 		return oops.
 			Code("VERIFICATION_NOT_CONFIGURED").
 			In("holepunch_coordinator").
 			With("session_id", sessionID).
 			Errorf("hole punch signature verifier not configured")
 	}
-	if err := hpc.VerifyHolePunchSignature(block, signerKey); err != nil {
+	if err := hpc.verifyHolePunchSignatureFn(block, signerKey); err != nil {
 		return oops.
 			Code("SIGNATURE_VERIFICATION_FAILED").
 			In("holepunch_coordinator").
@@ -419,7 +466,7 @@ func (hpc *HolePunchCoordinator) CompleteHolePunch(sessionID uint64) error {
 //
 // Returns error if session not found.
 func (hpc *HolePunchCoordinator) FailHolePunch(sessionID uint64, reason error) error {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "FailHolePunch", "sessionID": sessionID}).Debug("Failing hole punch")
+	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "FailHolePunch", "sessionID": sessionID, "reason": reason}).Debug("Failing hole punch")
 	hpc.mutex.Lock()
 	defer hpc.mutex.Unlock()
 

@@ -189,8 +189,14 @@ func ValidateTestResult(result *TestResult) error {
 
 	// At least one probe must have been attempted
 	if !result.DirectProbeSuccess && !result.RelayedProbeSuccess {
-		// Both probes failed is valid (NAT detection inconclusive)
-		// but we should have tried
+		// Both probes failed — result is valid but NAT detection is inconclusive.
+		// Ensure consistency flags are cleared to avoid misleading callers.
+		if result.PortConsistent || result.IPConsistent {
+			return oops.
+				Code("INCONSISTENT_FLAGS").
+				In("nat_detection").
+				Errorf("consistency flags must be false when both probes fail")
+		}
 	}
 
 	// If any probe succeeded, we should have an external address

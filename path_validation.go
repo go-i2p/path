@@ -3,6 +3,7 @@
 package path
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"net"
@@ -433,13 +434,17 @@ func (pv *PathValidator) GetChallenge(challengeID uint64) (*PathChallenge, bool)
 	}
 
 	// Return defensive copy
-	return &PathChallenge{
+	pc := &PathChallenge{
 		ChallengeID: challenge.ChallengeID,
-		NewAddr:     challenge.NewAddr,
 		Timestamp:   challenge.Timestamp,
 		State:       challenge.State,
 		ProbeSize:   challenge.ProbeSize,
-	}, true
+	}
+	if challenge.NewAddr != nil {
+		addrCopy := *challenge.NewAddr
+		pc.NewAddr = &addrCopy
+	}
+	return pc, true
 }
 
 // CleanupExpired removes expired path validation challenges.
@@ -642,8 +647,8 @@ func (pv *PathValidator) GetDiscoveredMTU() int {
 //   - low:  minimum probe size (typically MinMTU, 1280)
 //   - high: maximum probe size (e.g. MaxPacketSizeIPv4 or MaxPacketSizeIPv6)
 //
-// RunPMTUD blocks until the search completes or the context expires.
-func (pv *PathValidator) RunPMTUD(addr *net.UDPAddr, low, high int) int {
+// RunPMTUD blocks until the search completes or ctx is cancelled.
+func (pv *PathValidator) RunPMTUD(ctx context.Context, addr *net.UDPAddr, low, high int) int {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "RunPMTUD", "low": low, "high": high}).Debug("Running PMTUD")
 	if low < MinMTU {
 		low = MinMTU
@@ -670,7 +675,11 @@ func (pv *PathValidator) RunPMTUD(addr *net.UDPAddr, low, high int) int {
 		deadline := time.Now().Add(PathValidationTimeout)
 		probed := false
 		for time.Now().Before(deadline) {
-			time.Sleep(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return best
+			case <-time.After(100 * time.Millisecond):
+			}
 			ch, exists := pv.GetChallenge(id)
 			if exists && ch.State == ChallengeValidated {
 				probed = true
