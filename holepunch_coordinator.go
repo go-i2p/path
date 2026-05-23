@@ -44,6 +44,9 @@ type HolePunchCoordinator struct {
 	// stopCh is closed by Stop() to signal the cleanup goroutine to exit.
 	stopCh chan struct{}
 
+	// stopOnce ensures Stop() is idempotent and cannot panic on double-call.
+	stopOnce sync.Once
+
 	// mutex protects all fields
 	mutex sync.RWMutex
 }
@@ -128,9 +131,9 @@ func NewHolePunchCoordinator(manager *RelayManager) *HolePunchCoordinator {
 }
 
 // Stop halts the background cleanup goroutine. Call when the coordinator
-// is no longer needed to avoid goroutine leaks.
+// is no longer needed to avoid goroutine leaks. Safe to call multiple times.
 func (hpc *HolePunchCoordinator) Stop() {
-	close(hpc.stopCh)
+	hpc.stopOnce.Do(func() { close(hpc.stopCh) })
 }
 
 // cleanupLoop periodically removes expired hole punch attempts.
@@ -228,7 +231,7 @@ func (hpc *HolePunchCoordinator) InitiateHolePunch(remoteAddr, introducerAddr *n
 }
 
 // lookupAttempt validates inputs and returns the attempt under lock.
-// Caller must hold hpc.mutex.
+// Caller must hold hpc.mutex. If addr is nil, the address check is skipped.
 func (hpc *HolePunchCoordinator) lookupAttempt(sessionID uint64, addr *net.UDPAddr, addrLabel string) (*HolePunchAttempt, error) {
 	if sessionID == 0 {
 		return nil, oops.
@@ -237,7 +240,7 @@ func (hpc *HolePunchCoordinator) lookupAttempt(sessionID uint64, addr *net.UDPAd
 			Errorf("session ID cannot be zero")
 	}
 
-	if addr == nil {
+	if addr == nil && addrLabel != "" {
 		return nil, oops.
 			Code("INVALID_ADDRESS").
 			In("holepunch_coordinator").
@@ -383,21 +386,7 @@ func (hpc *HolePunchCoordinator) ProcessHolePunchResponse(sessionID uint64, addr
 // validateAndGetAttempt validates a session ID and returns the attempt.
 // Caller must hold hpc.mutex.
 func (hpc *HolePunchCoordinator) validateAndGetAttempt(sessionID uint64) (*HolePunchAttempt, error) {
-	if sessionID == 0 {
-		return nil, oops.
-			Code("INVALID_SESSION_ID").
-			In("holepunch_coordinator").
-			Errorf("session ID cannot be zero")
-	}
-	attempt, exists := hpc.attempts[sessionID]
-	if !exists {
-		return nil, oops.
-			Code("SESSION_NOT_FOUND").
-			In("holepunch_coordinator").
-			With("session_id", sessionID).
-			Errorf("hole punch session not found")
-	}
-	return attempt, nil
+	return hpc.lookupAttempt(sessionID, nil, "")
 }
 
 // RetryHolePunch retries a failed hole punch attempt.

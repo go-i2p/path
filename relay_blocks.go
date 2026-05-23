@@ -351,7 +351,10 @@ func DecodeRelayResponse(block *SSU2Block) (*RelayResponseBlock, error) {
 		Nonce: binary.BigEndian.Uint32(data[2:6]),
 	}
 
-	if resp.Code == 0 && len(data) > 6 {
+	if resp.Code == 0 {
+		if len(data) <= 6 {
+			return nil, oops.Errorf("accepted RelayResponse too short: %d bytes", len(data))
+		}
 		return decodeRelayResponseAccepted(resp, data)
 	} else if resp.Code >= 64 && len(data) > 6 {
 		return decodeRelayResponseCharlieRejection(resp, data)

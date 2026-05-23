@@ -45,6 +45,9 @@ type PeerTestManager struct {
 
 	// stopCh is closed by Stop() to signal the cleanup goroutine to exit.
 	stopCh chan struct{}
+
+	// stopOnce ensures Stop() is idempotent and cannot panic on double-call.
+	stopOnce sync.Once
 }
 
 // PeerTestRole represents the role of a peer in the test.
@@ -258,9 +261,9 @@ func NewPeerTestManager(listener ListenerRef) *PeerTestManager {
 }
 
 // Stop halts the background cleanup goroutine. Call when the manager is
-// no longer needed to avoid goroutine leaks.
+// no longer needed to avoid goroutine leaks. Safe to call multiple times.
 func (ptm *PeerTestManager) Stop() {
-	close(ptm.stopCh)
+	ptm.stopOnce.Do(func() { close(ptm.stopCh) })
 }
 
 // cleanupLoop periodically removes expired peer tests.
@@ -317,8 +320,7 @@ func (ptm *PeerTestManager) InitiatePeerTest(bobAddr *net.UDPAddr) (uint32, erro
 			return 0, oops.
 				Code("RANDOM_GENERATION_FAILED").
 				In("peertest_manager").
-				With("error", err.Error()).
-				Errorf("failed to generate nonce: %w", err)
+				Wrapf(err, "failed to generate nonce")
 		}
 		nonce = binary.BigEndian.Uint32(nonceBytes[:])
 		if nonce == 0 {
@@ -884,6 +886,7 @@ func NewPeerTestManagerWithFields(listener ListenerRef, tests map[uint32]*PeerTe
 		listener: listener,
 		tests:    tests,
 		results:  results,
+		stopCh:   make(chan struct{}),
 	}
 	return ptm
 }

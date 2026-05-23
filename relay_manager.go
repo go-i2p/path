@@ -224,10 +224,13 @@ func (rm *RelayManager) GetIntroducers() []*IntroducerInfo {
 	for _, intro := range rm.introducers {
 		if intro.ExpiresAt.After(now) {
 			infoCopy := &IntroducerInfo{
-				Addr:       intro.Addr,
 				RouterHash: intro.RouterHash,
 				RelayTag:   intro.RelayTag,
 				ExpiresAt:  intro.ExpiresAt,
+			}
+			if intro.Addr != nil {
+				addrCopy := *intro.Addr
+				infoCopy.Addr = &addrCopy
 			}
 			result = append(result, infoCopy)
 		}
@@ -498,6 +501,10 @@ func (rm *RelayManager) CleanupExpired() {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "cleanupExpired"}).Debug("Removing expired relay tags and introducers")
 	rm.mutex.Lock()
 	defer rm.mutex.Unlock()
+
+	if rm.stopped {
+		return
+	}
 
 	now := time.Now()
 

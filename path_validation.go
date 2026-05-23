@@ -565,7 +565,9 @@ func EncodePathChallengeWithPadding(challengeID uint64, probeSize int) *SSU2Bloc
 	}
 	data := make([]byte, probeSize)
 	binary.BigEndian.PutUint64(data[:8], challengeID)
-	// Fill remaining bytes with random padding; failure is non-fatal
+	// Fill remaining bytes with random padding; failure is non-fatal.
+	// On Linux/macOS, rand.Read never fails; on other systems, zero padding
+	// is still a valid MTU probe so we intentionally suppress the error.
 	if probeSize > 8 {
 		_, _ = rand.Read(data[8:])
 	}
@@ -674,11 +676,14 @@ func (pv *PathValidator) RunPMTUD(ctx context.Context, addr *net.UDPAddr, low, h
 		// Wait for probe response or timeout
 		deadline := time.Now().Add(PathValidationTimeout)
 		probed := false
+		ticker := time.NewTicker(100 * time.Millisecond)
 		for time.Now().Before(deadline) {
 			select {
 			case <-ctx.Done():
+				ticker.Stop()
+				pv.FailPath(id, ctx.Err())
 				return best
-			case <-time.After(100 * time.Millisecond):
+			case <-ticker.C:
 			}
 			ch, exists := pv.GetChallenge(id)
 			if exists && ch.State == ChallengeValidated {
@@ -689,6 +694,7 @@ func (pv *PathValidator) RunPMTUD(ctx context.Context, addr *net.UDPAddr, low, h
 				break
 			}
 		}
+		ticker.Stop()
 
 		if probed {
 			best = mid
