@@ -560,6 +560,7 @@ func (ptm *PeerTestManager) CleanupExpired() {
 	ptm.mutex.Lock()
 	defer ptm.mutex.Unlock()
 
+	// Clean expired tests
 	for nonce, test := range ptm.tests {
 		// Check if test has timed out (60 seconds per I2P spec)
 		if now.Sub(test.StartTime) > 60*time.Second {
@@ -568,6 +569,26 @@ func (ptm *PeerTestManager) CleanupExpired() {
 				delete(ptm.results, test.AliceAddr.String())
 			}
 			delete(ptm.tests, nonce)
+		}
+	}
+
+	// Clean orphaned results older than 5 minutes.
+	// This handles cases where results exist without corresponding tests:
+	// 1. CompleteTest() followed by RemoveTest()
+	// 2. Tests that timeout before AliceAddr is set
+	for addr, result := range ptm.results {
+		if now.Sub(result.TestTime) > 5*time.Minute {
+			// Verify no corresponding test exists
+			hasTest := false
+			for _, test := range ptm.tests {
+				if test.AliceAddr != nil && test.AliceAddr.String() == addr {
+					hasTest = true
+					break
+				}
+			}
+			if !hasTest {
+				delete(ptm.results, addr)
+			}
 		}
 	}
 }

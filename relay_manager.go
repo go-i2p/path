@@ -49,6 +49,9 @@ type RelayManager struct {
 
 	// stopped is set by Stop() to prevent writes to nil maps after shutdown
 	stopped bool
+
+	// stopOnce ensures Stop() is idempotent and cannot panic on double-call.
+	stopOnce sync.Once
 }
 
 // IntroducerInfo represents an available introducer for NAT traversal.
@@ -124,21 +127,24 @@ func NewRelayManager(listener ListenerRef) *RelayManager {
 }
 
 // Stop stops the relay manager and cleans up resources.
+// Safe to call multiple times (idempotent).
 func (rm *RelayManager) Stop() {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "Stop"}).Debug("Stopping RelayManager")
-	rm.mutex.Lock()
-	defer rm.mutex.Unlock()
+	rm.stopOnce.Do(func() {
+		log.WithFields(logger.Fields{"pkg": "ssu2", "func": "Stop"}).Debug("Stopping RelayManager")
+		rm.mutex.Lock()
+		defer rm.mutex.Unlock()
 
-	if rm.cleanupTimer != nil {
-		rm.cleanupTimer.Stop()
-		rm.cleanupTimer = nil
-	}
+		if rm.cleanupTimer != nil {
+			rm.cleanupTimer.Stop()
+			rm.cleanupTimer = nil
+		}
 
-	// Clear all state
-	rm.stopped = true
-	rm.introducers = nil
-	rm.relayTags = nil
-	rm.pendingSessions = nil
+		// Clear all state
+		rm.stopped = true
+		rm.introducers = nil
+		rm.relayTags = nil
+		rm.pendingSessions = nil
+	})
 }
 
 // RegisterIntroducer registers a new introducer for this peer.
