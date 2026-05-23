@@ -289,10 +289,19 @@ func (hpc *HolePunchCoordinator) SetVerifyHolePunchSignature(fn func(block *Rela
 }
 
 // verifyHolePunchSignatureInternal validates the block signature using the
-// configured verifier. Returns nil if block is nil (legacy callers).
+// configured verifier. Per SSU2 spec §Hole Punch, signatures are mandatory.
 func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
 	if block == nil {
-		return nil
+		log.WithFields(logger.Fields{
+			"pkg":        "ssu2",
+			"func":       "verifyHolePunchSignature",
+			"session_id": sessionID,
+		}).Warn("Rejecting hole punch with nil block - signature verification required")
+		return oops.
+			Code("MISSING_BLOCK").
+			In("holepunch_coordinator").
+			With("session_id", sessionID).
+			Errorf("hole punch block cannot be nil - signature verification required per SSU2 spec")
 	}
 	if hpc.verifyHolePunchSignatureFn == nil {
 		return oops.
@@ -427,14 +436,9 @@ func (hpc *HolePunchCoordinator) RetryHolePunch(sessionID uint64) error {
 	return nil
 }
 
-// CompleteHolePunch marks a hole punch attempt as successfully completed.
-//
-// Parameters:
-//   - sessionID: Session identifier
-//
-// Returns error if session not found.
-func (hpc *HolePunchCoordinator) CompleteHolePunch(sessionID uint64) error {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "CompleteHolePunch", "sessionID": sessionID}).Debug("Completing hole punch")
+// setAttemptState is a helper that validates and sets the state of a hole punch attempt.
+// BUG-010 fix: Extract common code from CompleteHolePunch/FailHolePunch
+func (hpc *HolePunchCoordinator) setAttemptState(sessionID uint64, state HolePunchState) error {
 	hpc.mutex.Lock()
 	defer hpc.mutex.Unlock()
 
@@ -443,8 +447,19 @@ func (hpc *HolePunchCoordinator) CompleteHolePunch(sessionID uint64) error {
 		return err
 	}
 
-	attempt.State = HolePunchSuccess
+	attempt.State = state
 	return nil
+}
+
+// CompleteHolePunch marks a hole punch attempt as successfully completed.
+//
+// Parameters:
+//   - sessionID: Session identifier
+//
+// Returns error if session not found.
+func (hpc *HolePunchCoordinator) CompleteHolePunch(sessionID uint64) error {
+	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "CompleteHolePunch", "sessionID": sessionID}).Debug("Completing hole punch")
+	return hpc.setAttemptState(sessionID, HolePunchSuccess)
 }
 
 // FailHolePunch marks a hole punch attempt as failed with a reason.
@@ -456,16 +471,7 @@ func (hpc *HolePunchCoordinator) CompleteHolePunch(sessionID uint64) error {
 // Returns error if session not found.
 func (hpc *HolePunchCoordinator) FailHolePunch(sessionID uint64, reason error) error {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "FailHolePunch", "sessionID": sessionID, "reason": reason}).Debug("Failing hole punch")
-	hpc.mutex.Lock()
-	defer hpc.mutex.Unlock()
-
-	attempt, err := hpc.validateAndGetAttempt(sessionID)
-	if err != nil {
-		return err
-	}
-
-	attempt.State = HolePunchFailed
-	return nil
+	return hpc.setAttemptState(sessionID, HolePunchFailed)
 }
 
 // GetAttempt retrieves hole punch attempt information.

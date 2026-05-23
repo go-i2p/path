@@ -175,14 +175,11 @@ func TestHolePunchCoordinator_HandleHolePunch(t *testing.T) {
 	require.NoError(t, err)
 
 	fromAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.3"), Port: 8889}
+
+	// Per BUG-001 fix: nil block must be rejected per SSU2 spec
 	err = hpc.HandleHolePunch(sessionID, fromAddr, nil, nil)
-
-	require.NoError(t, err)
-
-	// Verify state changed to Waiting
-	attempt := hpc.GetAttempt(sessionID)
-	require.NotNil(t, attempt)
-	assert.Equal(t, HolePunchWaiting, attempt.State)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "block cannot be nil")
 }
 
 func TestHolePunchCoordinator_HandleHolePunch_ZeroSessionID(t *testing.T) {
@@ -224,14 +221,10 @@ func TestHolePunchCoordinator_ProcessHolePunchResponse(t *testing.T) {
 	sessionID, err := hpc.InitiateHolePunch(remoteAddr, introducerAddr, relayTag)
 	require.NoError(t, err)
 
+	// Per BUG-001 fix: nil block must be rejected per SSU2 spec
 	err = hpc.ProcessHolePunchResponse(sessionID, remoteAddr, nil, nil)
-
-	require.NoError(t, err)
-
-	// Verify state changed to Success
-	attempt := hpc.GetAttempt(sessionID)
-	require.NotNil(t, attempt)
-	assert.Equal(t, HolePunchSuccess, attempt.State)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "block cannot be nil")
 }
 
 func TestHolePunchCoordinator_ProcessHolePunchResponse_ZeroSessionID(t *testing.T) {
@@ -275,10 +268,11 @@ func TestHolePunchCoordinator_ProcessHolePunchResponse_AddressMismatch(t *testin
 
 	// Different address
 	wrongAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.99"), Port: 9999}
+	// Per BUG-001 fix: nil block is rejected before address check
 	err = hpc.ProcessHolePunchResponse(sessionID, wrongAddr, nil, nil)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "address does not match expected remote")
+	assert.Contains(t, err.Error(), "block cannot be nil")
 }
 
 func TestHolePunchCoordinator_RetryHolePunch(t *testing.T) {
@@ -590,8 +584,10 @@ func TestHolePunchCoordinator_GetStats(t *testing.T) {
 
 	sessionID3, err := hpc.InitiateHolePunch(remoteAddr, introducerAddr, uint32(0x12345673))
 	require.NoError(t, err)
+	// Per BUG-001 fix: nil block must be rejected
 	err = hpc.HandleHolePunch(sessionID3, remoteAddr, nil, nil)
-	require.NoError(t, err)
+	require.Error(t, err)
+	// sessionID3 remains in requested state due to rejected nil block
 
 	sessionID4, err := hpc.InitiateHolePunch(remoteAddr, introducerAddr, uint32(0x12345674))
 	require.NoError(t, err)
@@ -607,9 +603,9 @@ func TestHolePunchCoordinator_GetStats(t *testing.T) {
 	stats := hpc.GetStats()
 
 	assert.Equal(t, 5, stats["total"])
-	assert.Equal(t, 1, stats["requested"]) // sessionID1
+	assert.Equal(t, 2, stats["requested"]) // sessionID1 and sessionID3 (rejected nil block)
 	assert.Equal(t, 1, stats["sent"])      // sessionID2
-	assert.Equal(t, 1, stats["waiting"])   // sessionID3
+	assert.Equal(t, 0, stats["waiting"])   // none (sessionID3 failed to reach waiting)
 	assert.Equal(t, 1, stats["success"])   // sessionID4
 	assert.Equal(t, 1, stats["failed"])    // sessionID5
 }

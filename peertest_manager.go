@@ -820,9 +820,11 @@ func (ptm *PeerTestManager) DetermineNATType(result *TestResult) NATType {
 		return NATUnknown
 	}
 
-	// Only direct succeeded (unusual case)
+	// BUG-011 fix: Direct succeeded but relay failed
+	// This may indicate an introducer/relay problem rather than NAT characteristics.
+	// Return NATUnknown to trigger re-probing rather than assuming NATCone.
 	if result.DirectProbeSuccess && !result.RelayedProbeSuccess {
-		return NATCone
+		return NATUnknown
 	}
 
 	return NATUnknown

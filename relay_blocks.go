@@ -162,6 +162,10 @@ func EncodeRelayRequest(req *RelayRequestBlock) (*SSU2Block, error) {
 	if req == nil {
 		return nil, oops.Errorf("RelayRequestBlock is nil")
 	}
+	// BUG-005 fix: Validate AliceIP is not nil before normalizeIP
+	if req.AliceIP == nil {
+		return nil, oops.Errorf("AliceIP cannot be nil")
+	}
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "EncodeRelayRequest", "nonce": req.Nonce, "relayTag": req.RelayTag}).Debug("Encoding relay request block")
 
 	ipBytes, asz, err := normalizeIP(req.AliceIP)
@@ -438,6 +442,10 @@ func EncodeRelayIntro(intro *RelayIntroBlock) (*SSU2Block, error) {
 
 	if len(intro.AliceRouterHash) != 32 {
 		return nil, oops.Errorf("AliceRouterHash must be 32 bytes, got %d", len(intro.AliceRouterHash))
+	}
+	// BUG-005 fix: Validate AliceIP is not nil before normalizeIP
+	if intro.AliceIP == nil {
+		return nil, oops.Errorf("AliceIP cannot be nil")
 	}
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "EncodeRelayIntro", "nonce": intro.Nonce, "relayTag": intro.AliceRelayTag}).Debug("Encoding relay intro block")
 

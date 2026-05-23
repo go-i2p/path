@@ -151,17 +151,22 @@ func AnalyzeProbeResults(directSuccess, relayedSuccess bool, addr1, addr2 *net.U
 	result := &TestResult{
 		DirectProbeSuccess:  directSuccess,
 		RelayedProbeSuccess: relayedSuccess,
-		PortConsistent:      IsPortConsistent(addr1, addr2),
-		IPConsistent:        IsIPConsistent(addr1, addr2),
 	}
 
-	// Set external address from first non-nil address
-	if addr1 != nil {
-		result.ExternalAddr = addr1
-		result.ExternalPort = uint16(addr1.Port)
-	} else if addr2 != nil {
-		result.ExternalAddr = addr2
-		result.ExternalPort = uint16(addr2.Port)
+	// BUG-004 fix: Only set consistency flags and external address if at least one probe succeeded
+	// This ensures ValidateTestResult contract is satisfied
+	if directSuccess || relayedSuccess {
+		result.PortConsistent = IsPortConsistent(addr1, addr2)
+		result.IPConsistent = IsIPConsistent(addr1, addr2)
+
+		// Set external address from first non-nil address
+		if addr1 != nil {
+			result.ExternalAddr = addr1
+			result.ExternalPort = uint16(addr1.Port)
+		} else if addr2 != nil {
+			result.ExternalAddr = addr2
+			result.ExternalPort = uint16(addr2.Port)
+		}
 	}
 
 	// Set reachability based on probe success
@@ -268,7 +273,16 @@ func CompareNATTypes(nat1, nat2 NATType) int {
 // to enable more connectivity options.
 //
 // Returns the less restrictive NAT type, or nat1 if equal.
+// BUG-012 fix: If one type is NATUnknown, prefer the known type.
 func SelectBestNATType(nat1, nat2 NATType) NATType {
+	// Handle unknown types specially
+	if nat1 == NATUnknown && nat2 != NATUnknown {
+		return nat2 // Prefer the known type
+	}
+	if nat2 == NATUnknown && nat1 != NATUnknown {
+		return nat1 // Prefer the known type
+	}
+
 	comparison := CompareNATTypes(nat1, nat2)
 	if comparison <= 0 {
 		return nat1 // nat1 is less or equal restrictive
@@ -283,7 +297,16 @@ func SelectBestNATType(nat1, nat2 NATType) NATType {
 // the worst case ensures relay mechanisms are properly engaged.
 //
 // Returns the more restrictive NAT type, or nat1 if equal.
+// BUG-012 fix: If one type is NATUnknown, prefer the known type.
 func SelectWorstNATType(nat1, nat2 NATType) NATType {
+	// Handle unknown types specially
+	if nat1 == NATUnknown && nat2 != NATUnknown {
+		return nat2 // Prefer the known type
+	}
+	if nat2 == NATUnknown && nat1 != NATUnknown {
+		return nat1 // Prefer the known type
+	}
+
 	comparison := CompareNATTypes(nat1, nat2)
 	if comparison >= 0 {
 		return nat1 // nat1 is more or equal restrictive

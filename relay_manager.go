@@ -174,6 +174,14 @@ func (rm *RelayManager) RegisterIntroducer(addr *net.UDPAddr, routerHash data.Ha
 	rm.mutex.Lock()
 	defer rm.mutex.Unlock()
 
+	// BUG-007 fix: Check if manager has been stopped
+	if rm.stopped {
+		return oops.
+			Code("MANAGER_STOPPED").
+			In("relay_manager").
+			Errorf("relay manager has been stopped")
+	}
+
 	// Check if already registered
 	for _, intro := range rm.introducers {
 		if intro.Addr.String() == addr.String() {
@@ -217,6 +225,11 @@ func (rm *RelayManager) GetIntroducers() []*IntroducerInfo {
 	rm.mutex.RLock()
 	defer rm.mutex.RUnlock()
 
+	// BUG-007 fix: Return empty if stopped
+	if rm.stopped {
+		return nil
+	}
+
 	// Create defensive copies
 	result := make([]*IntroducerInfo, 0, len(rm.introducers))
 	now := time.Now()
@@ -251,6 +264,11 @@ func (rm *RelayManager) RemoveIntroducer(addr *net.UDPAddr) {
 
 	rm.mutex.Lock()
 	defer rm.mutex.Unlock()
+
+	// BUG-007 fix: Return early if stopped
+	if rm.stopped {
+		return
+	}
 
 	for i, intro := range rm.introducers {
 		if intro.Addr.String() == addr.String() {
@@ -342,6 +360,11 @@ func (rm *RelayManager) ValidateRelayTag(tag uint32, addr *net.UDPAddr) bool {
 	rm.mutex.RLock()
 	defer rm.mutex.RUnlock()
 
+	// BUG-007 fix: Return false if stopped
+	if rm.stopped {
+		return false
+	}
+
 	relayTag, exists := rm.relayTags[tag]
 	if !exists {
 		return false
@@ -349,6 +372,11 @@ func (rm *RelayManager) ValidateRelayTag(tag uint32, addr *net.UDPAddr) bool {
 
 	// Check expiration
 	if time.Now().After(relayTag.ExpiresAt) {
+		return false
+	}
+
+	// BUG-008 fix: Guard against nil ForAddr
+	if relayTag.ForAddr == nil {
 		return false
 	}
 
@@ -371,18 +399,33 @@ func (rm *RelayManager) GetRelayTag(tag uint32) *RelayTag {
 	rm.mutex.RLock()
 	defer rm.mutex.RUnlock()
 
+	// BUG-007 fix: Return nil if stopped
+	if rm.stopped {
+		return nil
+	}
+
 	relayTag, exists := rm.relayTags[tag]
 	if !exists || time.Now().After(relayTag.ExpiresAt) {
 		return nil
 	}
 
 	// Return defensive copy
-	return &RelayTag{
+	copied := &RelayTag{
 		Tag:       relayTag.Tag,
-		ForAddr:   relayTag.ForAddr,
 		CreatedAt: relayTag.CreatedAt,
 		ExpiresAt: relayTag.ExpiresAt,
 	}
+	// BUG-003 fix: Deep copy ForAddr to prevent aliasing
+	if relayTag.ForAddr != nil {
+		addrCopy := *relayTag.ForAddr
+		// Deep copy IP slice to prevent shared memory
+		if addrCopy.IP != nil {
+			addrCopy.IP = make(net.IP, len(addrCopy.IP))
+			copy(addrCopy.IP, relayTag.ForAddr.IP)
+		}
+		copied.ForAddr = &addrCopy
+	}
+	return copied
 }
 
 // AddPendingSession adds a session awaiting hole punch completion.

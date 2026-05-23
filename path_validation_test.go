@@ -364,10 +364,10 @@ func TestPathValidator_ValidatePath_SetAddrError(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to set remote address")
 
-	// Challenge should be marked as failed
-	challenge, exists := pv.GetChallenge(challengeID)
-	require.True(t, exists)
-	assert.Equal(t, ChallengeFailed, challenge.State)
+	// BUG-002 fix: Challenge is deleted before side effects to prevent TOCTOU race
+	// When SetRemoteAddr fails, challenge is already gone (not marked as failed)
+	_, exists := pv.GetChallenge(challengeID)
+	require.False(t, exists)
 }
 
 // TestPathValidator_FailPath tests marking path validation as failed.

@@ -84,6 +84,10 @@ type PathChallenge struct {
 	// ProbeSize is the total packet size this challenge probes (G-5).
 	// 0 for non-MTU challenges.
 	ProbeSize int
+
+	// BUG-014 fix: done is closed when the challenge completes (validated or failed)
+	// to wake RunPMTUD without polling
+	done chan struct{}
 }
 
 // PathChallengeState represents the state of a path validation attempt.
@@ -158,12 +162,18 @@ func NewPathValidator(conn PathValidationConn) *PathValidator {
 // Per spec, tokens are bound to an IP:port and must be invalidated on address change.
 func (pv *PathValidator) SetTokenCache(tc TokenCacheAccessor) {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "SetTokenCache"}).Debug("Setting token cache for path validator")
+	// BUG-006 fix: Protect with mutex for thread safety
+	pv.mutex.Lock()
+	defer pv.mutex.Unlock()
 	pv.tokenCache = tc
 }
 
 // SetCongestionController sets the congestion controller to reset on path migration (G-7).
 func (pv *PathValidator) SetCongestionController(cc CongestionControllerAccessor) {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "SetCongestionController"}).Debug("Setting congestion controller for path validator")
+	// BUG-006 fix: Protect with mutex for thread safety
+	pv.mutex.Lock()
+	defer pv.mutex.Unlock()
 	pv.congestionController = cc
 }
 
@@ -197,6 +207,7 @@ func (pv *PathValidator) InitiatePathValidation(newAddr *net.UDPAddr) (uint64, e
 		NewAddr:     newAddr,
 		Timestamp:   time.Now(),
 		State:       ChallengeSent,
+		done:        make(chan struct{}), // BUG-014 fix: signal channel
 	}
 
 	pv.mutex.Lock()
@@ -262,6 +273,7 @@ func (pv *PathValidator) HandlePathChallenge(block *SSU2Block, fromAddr *net.UDP
 		NewAddr:     fromAddr,
 		Timestamp:   time.Now(),
 		State:       ChallengeReceived,
+		done:        make(chan struct{}), // BUG-014 fix: signal channel
 	}
 
 	pv.mutex.Lock()
@@ -333,6 +345,11 @@ func (pv *PathValidator) HandlePathResponse(block *SSU2Block, fromAddr *net.UDPA
 	// Mark as validated
 	challenge.State = ChallengeValidated
 
+	// BUG-014 fix: Signal completion
+	if challenge.done != nil {
+		close(challenge.done)
+	}
+
 	// Update discovered MTU if this was a probe challenge (G-5)
 	if challenge.ProbeSize > 0 && challenge.ProbeSize > pv.discoveredMTU {
 		pv.discoveredMTU = challenge.ProbeSize
@@ -371,32 +388,35 @@ func (pv *PathValidator) ValidatePath(challengeID uint64) error {
 	}
 
 	newAddr := challenge.NewAddr
+	// BUG-002 fix: Delete challenge before unlock to prevent TOCTOU race
+	// This ensures side effects execute exactly once even with concurrent calls
+	delete(pv.challenges, challengeID)
+
+	// BUG-006 fix: Read accessor fields under lock to prevent race
+	tokenCache := pv.tokenCache
+	congestionController := pv.congestionController
 	pv.mutex.Unlock()
 
 	// Invalidate tokens bound to the old address before migration
-	if pv.tokenCache != nil {
+	if tokenCache != nil {
 		oldAddr := pv.conn.GetRemoteAddr()
 		if oldAddr != nil {
-			pv.tokenCache.InvalidateAddress(oldAddr)
+			tokenCache.InvalidateAddress(oldAddr)
 		}
 	}
 
 	// Update connection remote address
 	if err := pv.conn.SetRemoteAddr(newAddr); err != nil {
-		pv.FailPath(challengeID, err)
+		// Note: Challenge already deleted above to prevent TOCTOU race
+		// Cannot call FailPath since challenge no longer exists
 		return oops.Wrapf(err, "failed to set remote address")
 	}
 
 	// G-7: Reset congestion controller after successful path migration
 	// to re-enter slow start on the new path.
-	if pv.congestionController != nil {
-		pv.congestionController.Reset()
+	if congestionController != nil {
+		congestionController.Reset()
 	}
-
-	// Clean up challenge after successful migration
-	pv.mutex.Lock()
-	delete(pv.challenges, challengeID)
-	pv.mutex.Unlock()
 
 	return nil
 }
@@ -413,6 +433,10 @@ func (pv *PathValidator) FailPath(challengeID uint64, reason error) {
 
 	if challenge, exists := pv.challenges[challengeID]; exists {
 		challenge.State = ChallengeFailed
+		// BUG-014 fix: Signal completion
+		if challenge.done != nil {
+			close(challenge.done)
+		}
 	}
 }
 
@@ -479,12 +503,22 @@ func (pv *PathValidator) CleanupExpired() int {
 }
 
 // generateChallengeID generates a cryptographically random 8-byte challenge ID.
+// BUG-009 fix: Retry if we get zero (probability 1/2^64)
 func generateChallengeID() (uint64, error) {
-	var buf [8]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return 0, oops.Wrapf(err, "failed to read random bytes")
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		var buf [8]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			return 0, oops.Wrapf(err, "failed to read random bytes")
+		}
+		id := binary.BigEndian.Uint64(buf[:])
+		if id != 0 {
+			return id, nil
+		}
+		// Extremely unlikely: got zero, retry
 	}
-	return binary.BigEndian.Uint64(buf[:]), nil
+	// If we still got zero after maxAttempts, just use 1 as fallback
+	return 1, nil
 }
 
 // EncodePathChallenge encodes a Path Challenge block (Type 18).
@@ -596,6 +630,7 @@ func (pv *PathValidator) InitiateMTUProbe(addr *net.UDPAddr, size int) (uint64, 
 		Timestamp:   time.Now(),
 		State:       ChallengeSent,
 		ProbeSize:   size,
+		done:        make(chan struct{}), // BUG-014 fix: signal channel
 	}
 
 	pv.mutex.Lock()
@@ -627,6 +662,10 @@ func (pv *PathValidator) CompleteMTUProbe(challengeID uint64) {
 	challenge.State = ChallengeValidated
 	if challenge.ProbeSize > pv.discoveredMTU {
 		pv.discoveredMTU = challenge.ProbeSize
+	}
+	// BUG-014 fix: Signal completion
+	if challenge.done != nil {
+		close(challenge.done)
 	}
 }
 
@@ -673,28 +712,35 @@ func (pv *PathValidator) RunPMTUD(ctx context.Context, addr *net.UDPAddr, low, h
 			continue
 		}
 
-		// Wait for probe response or timeout
+		// BUG-014 fix: Wait for probe response or timeout using signal channel
 		deadline := time.Now().Add(PathValidationTimeout)
 		probed := false
-		ticker := time.NewTicker(100 * time.Millisecond)
-		for time.Now().Before(deadline) {
-			select {
-			case <-ctx.Done():
-				ticker.Stop()
-				pv.FailPath(id, ctx.Err())
-				return best
-			case <-ticker.C:
-			}
-			ch, exists := pv.GetChallenge(id)
-			if exists && ch.State == ChallengeValidated {
-				probed = true
-				break
-			}
-			if exists && ch.State == ChallengeFailed {
-				break
-			}
+		timeout := time.Until(deadline)
+		if timeout < 0 {
+			timeout = 0
 		}
-		ticker.Stop()
+		timer := time.NewTimer(timeout)
+		ch, exists := pv.GetChallenge(id)
+		if !exists {
+			timer.Stop()
+			high = mid - 1
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			pv.FailPath(id, ctx.Err())
+			return best
+		case <-ch.done:
+			timer.Stop()
+			// Check final state
+			ch2, exists2 := pv.GetChallenge(id)
+			if exists2 && ch2.State == ChallengeValidated {
+				probed = true
+			}
+		case <-timer.C:
+			// Timeout - probe failed
+		}
 
 		if probed {
 			best = mid
