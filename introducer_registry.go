@@ -1,4 +1,4 @@
-package path
+package ssu2path
 
 import (
 	"net"
@@ -182,9 +182,14 @@ func (ir *IntroducerRegistry) findOldestIndex() int {
 }
 
 // RemoveIntroducer removes an introducer by address.
+// Note: This method uses swap-and-truncate for O(1) removal, which does NOT preserve
+// the order of remaining introducers. If the removed introducer is not the last element,
+// the last introducer will be moved to the removed position.
 //
 // Parameters:
 //   - addr: UDP address of the introducer to remove
+//
+// BUG-L03 fix: Documented order instability in removal operation.
 func (ir *IntroducerRegistry) RemoveIntroducer(addr *net.UDPAddr) {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "RemoveIntroducer"}).Debug("Removing introducer by address")
 	if addr == nil {

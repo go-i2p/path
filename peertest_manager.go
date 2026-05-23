@@ -1,4 +1,4 @@
-package path
+package ssu2path
 
 import (
 	"crypto/rand"
@@ -366,6 +366,13 @@ func (ptm *PeerTestManager) InitiatePeerTest(bobAddr *net.UDPAddr) (uint32, erro
 //   - nonce: Test nonce
 //
 // Returns test copy, or nil if not found.
+//
+// Performance Note (BUG-L05): This method returns a defensive copy to prevent
+// external mutation of internal state. This involves 4-5 allocations per call
+// (UDPAddr copies + struct copy). The current approach prioritizes safety over
+// performance and is acceptable for typical usage patterns. If profiling reveals
+// this is a hot path causing GC pressure, consider alternatives like read-only
+// views or sync.Pool, but only after demonstrating actual performance impact.
 func (ptm *PeerTestManager) GetTest(nonce uint32) *PeerTest {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "GetTest", "nonce": nonce}).Debug("Retrieving peer test")
 	if nonce == 0 {
@@ -801,6 +808,7 @@ func (ptm *PeerTestManager) SetAliceAddr(nonce uint32, addr *net.UDPAddr) error 
 //   - result: Test result with probe outcomes
 //
 // Returns determined NAT type.
+// BUG-L02 fix: Refactored to reduce cyclomatic complexity by extracting NAT determination logic.
 func (ptm *PeerTestManager) DetermineNATType(result *TestResult) NATType {
 	if result == nil {
 		return NATUnknown
@@ -808,32 +816,12 @@ func (ptm *PeerTestManager) DetermineNATType(result *TestResult) NATType {
 
 	// Both probes succeeded
 	if result.DirectProbeSuccess && result.RelayedProbeSuccess {
-		if result.PortConsistent && result.IPConsistent {
-			// Check whether the observed external address matches a local interface.
-			// If it does, the peer has a public IP with no NAT; otherwise full cone NAT.
-			if result.ExternalAddr != nil && isLocalAddress(result.ExternalAddr.IP) {
-				return NATNone
-			}
-			return NATCone
-		}
-		if !result.PortConsistent {
-			// Port changes = symmetric or port-restricted
-			return NATPortRestricted
-		}
-		if !result.IPConsistent {
-			// IP changes = multiple NATs or proxies
-			return NATRestricted
-		}
+		return ptm.determineNATFromBothProbes(result)
 	}
 
 	// Only relayed probe succeeded
 	if !result.DirectProbeSuccess && result.RelayedProbeSuccess {
-		if result.PortConsistent {
-			// Port stays same but direct fails = restricted cone
-			return NATRestricted
-		}
-		// Port changes = symmetric NAT
-		return NATSymmetric
+		return ptm.determineNATFromRelayedOnly(result)
 	}
 
 	// Neither probe succeeded
@@ -849,6 +837,39 @@ func (ptm *PeerTestManager) DetermineNATType(result *TestResult) NATType {
 	}
 
 	return NATUnknown
+}
+
+// determineNATFromBothProbes determines NAT type when both direct and relayed probes succeeded.
+// This helper reduces cyclomatic complexity in DetermineNATType.
+func (ptm *PeerTestManager) determineNATFromBothProbes(result *TestResult) NATType {
+	if result.PortConsistent && result.IPConsistent {
+		// Check whether the observed external address matches a local interface.
+		// If it does, the peer has a public IP with no NAT; otherwise full cone NAT.
+		if result.ExternalAddr != nil && isLocalAddress(result.ExternalAddr.IP) {
+			return NATNone
+		}
+		return NATCone
+	}
+	if !result.PortConsistent {
+		// Port changes = symmetric or port-restricted
+		return NATPortRestricted
+	}
+	if !result.IPConsistent {
+		// IP changes = multiple NATs or proxies
+		return NATRestricted
+	}
+	return NATUnknown
+}
+
+// determineNATFromRelayedOnly determines NAT type when only relayed probe succeeded.
+// This helper reduces cyclomatic complexity in DetermineNATType.
+func (ptm *PeerTestManager) determineNATFromRelayedOnly(result *TestResult) NATType {
+	if result.PortConsistent {
+		// Port stays same but direct fails = restricted cone
+		return NATRestricted
+	}
+	// Port changes = symmetric NAT
+	return NATSymmetric
 }
 
 // GetListener returns the listener reference (for testing).

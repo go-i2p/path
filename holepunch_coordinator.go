@@ -1,4 +1,4 @@
-package path
+package ssu2path
 
 import (
 	"crypto/ed25519"
@@ -322,17 +322,18 @@ func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, bloc
 
 // HandleHolePunch processes an incoming hole punch packet from a remote peer.
 // Per SSU2 spec §Hole Punch, the message's signature MUST be verified before
-// processing. If block is non-nil and VerifyHolePunchSignature is set, the
-// signature is verified. If VerifyHolePunchSignature is nil, the message is
-// rejected to prevent unauthenticated state transitions.
+// processing. The block parameter MUST NOT be nil - signature verification is
+// mandatory per the SSU2 specification. If VerifyHolePunchSignature is not set,
+// the message is rejected to prevent unauthenticated state transitions.
 //
 // Parameters:
 //   - sessionID: Session identifier from the packet
 //   - fromAddr: Address the packet came from
-//   - block: The decoded RelayIntro-format block (may be nil for legacy callers)
+//   - block: The decoded RelayIntro-format block (MUST NOT be nil)
 //   - signerKey: Ed25519 public key of the message signer
 //
-// Returns error if session not found or signature verification fails.
+// Returns error if session not found, block is nil, or signature verification fails.
+// BUG-M03 fix: Clarified that block parameter cannot be nil.
 func (hpc *HolePunchCoordinator) HandleHolePunch(sessionID uint64, fromAddr *net.UDPAddr, block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "HandleHolePunch", "sessionID": sessionID}).Debug("Handling hole punch")
 	hpc.mutex.Lock()
@@ -353,14 +354,16 @@ func (hpc *HolePunchCoordinator) HandleHolePunch(sessionID uint64, fromAddr *net
 
 // ProcessHolePunchResponse processes a response to a hole punch attempt.
 // Per SSU2 spec §Hole Punch, the response's signature MUST be verified.
+// The block parameter MUST NOT be nil - signature verification is mandatory.
 //
 // Parameters:
 //   - sessionID: Session identifier
 //   - addr: Address that responded
-//   - block: The decoded RelayIntro-format block (may be nil for legacy callers)
+//   - block: The decoded RelayIntro-format block (MUST NOT be nil)
 //   - signerKey: Ed25519 public key of the message signer
 //
-// Returns error if session not found or signature verification fails.
+// Returns error if session not found, block is nil, or signature verification fails.
+// BUG-M03 fix: Clarified that block parameter cannot be nil.
 func (hpc *HolePunchCoordinator) ProcessHolePunchResponse(sessionID uint64, addr *net.UDPAddr, block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "ProcessHolePunchResponse", "sessionID": sessionID}).Debug("Processing hole punch response")
 	hpc.mutex.Lock()

@@ -1,6 +1,6 @@
 // Package ssu2 provides SSU2-specific implementations for the Noise Protocol Framework
 // supporting I2P's SSU2 transport protocol with UDP-based connections and NAT traversal.
-package path
+package ssu2path
 
 import (
 	"context"
@@ -677,6 +677,37 @@ func (pv *PathValidator) GetDiscoveredMTU() int {
 	return pv.discoveredMTU
 }
 
+// waitForProbeResult waits for a probe to complete or timeout.
+// Returns true if the probe was validated, false otherwise.
+// This helper reduces cyclomatic complexity in RunPMTUD.
+func (pv *PathValidator) waitForProbeResult(ctx context.Context, id uint64) bool {
+	deadline := time.Now().Add(PathValidationTimeout)
+	timeout := time.Until(deadline)
+	if timeout < 0 {
+		timeout = 0
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	ch, exists := pv.GetChallenge(id)
+	if !exists {
+		return false
+	}
+
+	select {
+	case <-ctx.Done():
+		pv.FailPath(id, ctx.Err())
+		return false
+	case <-ch.done:
+		// Check final state
+		ch2, exists2 := pv.GetChallenge(id)
+		return exists2 && ch2.State == ChallengeValidated
+	case <-timer.C:
+		// Timeout - probe failed
+		return false
+	}
+}
+
 // RunPMTUD performs Path MTU Discovery using binary search between low and
 // high. Each step sends a padded Path Challenge and waits for a response.
 // On success the discovered MTU is updated; on timeout (no response within
@@ -689,6 +720,7 @@ func (pv *PathValidator) GetDiscoveredMTU() int {
 //   - high: maximum probe size (e.g. MaxPacketSizeIPv4 or MaxPacketSizeIPv6)
 //
 // RunPMTUD blocks until the search completes or ctx is cancelled.
+// BUG-L02 fix: Refactored to reduce cyclomatic complexity by extracting probe logic.
 func (pv *PathValidator) RunPMTUD(ctx context.Context, addr *net.UDPAddr, low, high int) int {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "RunPMTUD", "low": low, "high": high}).Debug("Running PMTUD")
 	if low < MinMTU {
@@ -712,37 +744,7 @@ func (pv *PathValidator) RunPMTUD(ctx context.Context, addr *net.UDPAddr, low, h
 			continue
 		}
 
-		// BUG-014 fix: Wait for probe response or timeout using signal channel
-		deadline := time.Now().Add(PathValidationTimeout)
-		probed := false
-		timeout := time.Until(deadline)
-		if timeout < 0 {
-			timeout = 0
-		}
-		timer := time.NewTimer(timeout)
-		ch, exists := pv.GetChallenge(id)
-		if !exists {
-			timer.Stop()
-			high = mid - 1
-			continue
-		}
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			pv.FailPath(id, ctx.Err())
-			return best
-		case <-ch.done:
-			timer.Stop()
-			// Check final state
-			ch2, exists2 := pv.GetChallenge(id)
-			if exists2 && ch2.State == ChallengeValidated {
-				probed = true
-			}
-		case <-timer.C:
-			// Timeout - probe failed
-		}
-
-		if probed {
+		if pv.waitForProbeResult(ctx, id) {
 			best = mid
 			low = mid + 1
 		} else {

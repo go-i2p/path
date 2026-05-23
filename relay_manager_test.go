@@ -1,4 +1,4 @@
-package path
+package ssu2path
 
 import (
 	"sync"

@@ -1,4 +1,4 @@
-package path
+package ssu2path
 
 import (
 	"crypto/rand"
@@ -120,10 +120,23 @@ func NewRelayManager(listener ListenerRef) *RelayManager {
 		pendingSessions: make(map[uint64]*PendingSession),
 	}
 
-	// Start cleanup timer (every 5 minutes)
-	rm.cleanupTimer = time.AfterFunc(5*time.Minute, rm.CleanupExpired)
+	// BUG-M02 fix: Don't start timer in constructor
+	// Caller must explicitly call Start() to begin cleanup timer
 
 	return rm
+}
+
+// Start starts the cleanup timer for periodic maintenance.
+// Must be called after NewRelayManager() to enable automatic cleanup.
+// Safe to call multiple times (idempotent).
+func (rm *RelayManager) Start() {
+	rm.mutex.Lock()
+	defer rm.mutex.Unlock()
+
+	if rm.cleanupTimer == nil && !rm.stopped {
+		log.WithFields(logger.Fields{"pkg": "ssu2", "func": "Start"}).Debug("Starting RelayManager cleanup timer")
+		rm.cleanupTimer = time.AfterFunc(5*time.Minute, rm.CleanupExpired)
+	}
 }
 
 // Stop stops the relay manager and cleans up resources.
@@ -396,6 +409,12 @@ func (rm *RelayManager) ValidateRelayTag(tag uint32, addr *net.UDPAddr) bool {
 //   - tag: Relay tag to look up
 //
 // Returns RelayTag info, or nil if not found.
+//
+// Performance Note (BUG-L05): This method returns a defensive copy including deep
+// copy of IP address slice to prevent external mutation. This involves multiple
+// allocations per call but ensures thread-safety and prevents aliasing bugs.
+// The current approach prioritizes correctness over performance. Optimize only
+// if profiling shows this is a bottleneck in production.
 func (rm *RelayManager) GetRelayTag(tag uint32) *RelayTag {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "GetRelayTag", "tag": tag}).Debug("Retrieving relay tag info")
 	if tag == 0 {

@@ -1,4 +1,4 @@
-package path
+package ssu2path
 
 import "github.com/go-i2p/logger"
 
