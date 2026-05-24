@@ -4,9 +4,16 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"net"
+	"time"
 
 	"github.com/samber/oops"
 )
+
+// HolePunchSessionTimeout is the maximum lifetime of a pending hole-punch
+// session. Shared by HolePunchCoordinator and RelayManager cleanup loops so
+// both sides age out sessions at the same rate.
+// L-04 fix: single definition replaces the two duplicated 30*time.Second literals.
+const HolePunchSessionTimeout = 30 * time.Second
 
 // normalizeIP converts the given IP into its compact byte form and returns
 // the corresponding address-size field value per SSU2 spec (6 for IPv4, 18
@@ -81,4 +88,19 @@ func signData(privateKey ed25519.PrivateKey, data []byte) []byte {
 // verifyData verifies an Ed25519 signature over the provided data.
 func verifyData(publicKey ed25519.PublicKey, data, signature []byte) bool {
 	return ed25519.Verify(publicKey, data, signature)
+}
+
+// addrEqual reports whether two *net.UDPAddr values refer to the same endpoint.
+// M-01 fix: uses net.IP.Equal instead of String comparison so that an IPv4
+// address (203.0.113.1) and its IPv4-in-IPv6 form (::ffff:203.0.113.1) are
+// treated as equal, consistent with Go's net.IP.Equal semantics.
+// Both a and b may be nil; nil == nil is true, nil != non-nil.
+func addrEqual(a, b *net.UDPAddr) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Port == b.Port && a.IP.Equal(b.IP)
 }

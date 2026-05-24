@@ -97,9 +97,9 @@ func (ir *IntroducerRegistry) AddIntroducer(info *RegisteredIntroducer) error {
 	ir.mutex.Lock()
 	defer ir.mutex.Unlock()
 
-	// Check if introducer already exists
+	// Check if introducer already exists (M-01 fix: addrEqual handles IPv4/IPv6 parity)
 	for i, intro := range ir.introducers {
-		if intro.Addr.String() == info.Addr.String() {
+		if addrEqual(intro.Addr, info.Addr) {
 			ir.introducers[i] = ir.copyIntroducer(info)
 			return nil
 		}
@@ -200,7 +200,7 @@ func (ir *IntroducerRegistry) RemoveIntroducer(addr *net.UDPAddr) {
 	defer ir.mutex.Unlock()
 
 	for i, intro := range ir.introducers {
-		if intro.Addr.String() == addr.String() {
+		if addrEqual(intro.Addr, addr) { // M-01 fix
 			// Remove by swapping with last and truncating
 			ir.introducers[i] = ir.introducers[len(ir.introducers)-1]
 			ir.introducers = ir.introducers[:len(ir.introducers)-1]
@@ -237,7 +237,7 @@ func (ir *IntroducerRegistry) UpdateLastSeen(addr *net.UDPAddr) {
 	defer ir.mutex.Unlock()
 
 	for _, intro := range ir.introducers {
-		if intro.Addr.String() == addr.String() {
+		if addrEqual(intro.Addr, addr) { // M-01 fix
 			intro.LastSeen = time.Now()
 			return
 		}

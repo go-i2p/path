@@ -409,8 +409,8 @@ func (pv *PathValidator) HandlePathResponse(block *SSU2Block, fromAddr *net.UDPA
 		return nil
 	}
 
-	// Verify response came from expected address
-	if challenge.NewAddr.String() != fromAddr.String() {
+	// Verify response came from expected address (M-01 fix: use addrEqual for IPv4/IPv6 parity)
+	if !addrEqual(challenge.NewAddr, fromAddr) {
 		pv.mutex.Unlock()
 		return oops.Errorf("path response from unexpected address: expected %v, got %v",
 			challenge.NewAddr, fromAddr)
@@ -587,6 +587,11 @@ func (pv *PathValidator) CleanupExpired() int {
 		// Check timeout
 		if now.Sub(challenge.Timestamp) > PathValidationTimeout {
 			challenge.State = ChallengeFailed
+			// M-03 fix: close done channel so waitForProbeResult is woken up
+			// instead of blocking until its own timer fires.
+			if challenge.done != nil {
+				close(challenge.done)
+			}
 			delete(pv.challenges, id)
 			cleaned++
 		}

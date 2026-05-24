@@ -161,11 +161,14 @@ func AnalyzeProbeResults(directSuccess, relayedSuccess bool, addr1, addr2 *net.U
 		result.IPConsistent = IsIPConsistent(addr1, addr2)
 
 		// Set external address from first non-nil address
+		// M-05 fix: deep copy to prevent caller from mutating shared state.
 		if addr1 != nil {
-			result.ExternalAddr = addr1
+			a := *addr1
+			result.ExternalAddr = &a
 			result.ExternalPort = uint16(addr1.Port)
 		} else if addr2 != nil {
-			result.ExternalAddr = addr2
+			a := *addr2
+			result.ExternalAddr = &a
 			result.ExternalPort = uint16(addr2.Port)
 		}
 	}

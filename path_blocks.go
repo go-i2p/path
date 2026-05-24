@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 
+	"github.com/go-i2p/logger"
 	"github.com/samber/oops"
 )
 
@@ -90,7 +91,14 @@ func EncodePathChallengeWithPadding(challengeID uint64, probeSize int) *SSU2Bloc
 	// on other systems, zero padding is still a valid MTU probe payload,
 	// so the error is intentionally ignored. (L-8 fix: explicit comment added.)
 	if probeSize > 8 {
-		_, _ = rand.Read(data[8:])
+		// L-03 fix: log CSPRNG failures instead of silently ignoring them.
+		// Zero padding is still a valid MTU probe payload, so this is non-fatal.
+		if _, err := rand.Read(data[8:]); err != nil {
+			log.WithFields(logger.Fields{
+				"pkg":  "ssu2",
+				"func": "EncodePathChallengeWithPadding",
+			}).Warn("CSPRNG failed for probe padding; using zero padding")
+		}
 	}
 	return NewSSU2Block(BlockTypePathChallenge, data)
 }

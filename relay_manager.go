@@ -201,9 +201,9 @@ func (rm *RelayManager) RegisterIntroducer(addr *net.UDPAddr, routerHash data.Ha
 			Errorf("relay manager has been stopped")
 	}
 
-	// Check if already registered
+	// Check if already registered (M-01 fix: use addrEqual for IPv4/IPv6 parity)
 	for _, intro := range rm.introducers {
-		if intro.Addr.String() == addr.String() {
+		if addrEqual(intro.Addr, addr) {
 			// Update existing
 			intro.RelayTag = relayTag
 			intro.ExpiresAt = time.Now().Add(1 * time.Hour)
@@ -212,8 +212,11 @@ func (rm *RelayManager) RegisterIntroducer(addr *net.UDPAddr, routerHash data.Ha
 	}
 
 	// Create new introducer info
+	// M-06 fix: deep copy addr so mutations to the caller's value cannot
+	// affect the stored entry.
+	addrCopy := *addr
 	info := &IntroducerInfo{
-		Addr:       addr,
+		Addr:       &addrCopy,
 		RouterHash: routerHash,
 		RelayTag:   relayTag,
 		ExpiresAt:  time.Now().Add(1 * time.Hour),
@@ -290,7 +293,7 @@ func (rm *RelayManager) RemoveIntroducer(addr *net.UDPAddr) {
 	}
 
 	for i, intro := range rm.introducers {
-		if intro.Addr.String() == addr.String() {
+		if addrEqual(intro.Addr, addr) { // M-01 fix
 			// Remove by replacing with last element and shrinking
 			rm.introducers[i] = rm.introducers[len(rm.introducers)-1]
 			rm.introducers = rm.introducers[:len(rm.introducers)-1]
@@ -414,8 +417,8 @@ func (rm *RelayManager) ValidateRelayTag(tag uint32, addr *net.UDPAddr) bool {
 		return false
 	}
 
-	// Check address match
-	return relayTag.ForAddr.String() == addr.String()
+	// Check address match (M-01 fix: use addrEqual for IPv4/IPv6 parity)
+	return addrEqual(relayTag.ForAddr, addr)
 }
 
 // GetRelayTag retrieves relay tag information.
@@ -568,6 +571,11 @@ func (rm *RelayManager) RemovePendingSession(sessionID uint64) {
 	rm.mutex.Lock()
 	defer rm.mutex.Unlock()
 
+	// L-05 fix: guard against post-Stop calls, consistent with other mutating methods.
+	if rm.stopped {
+		return
+	}
+
 	delete(rm.pendingSessions, sessionID)
 }
 
@@ -580,6 +588,11 @@ func (rm *RelayManager) RemovePendingSession(sessionID uint64) {
 func (rm *RelayManager) IncrementRetries(sessionID uint64) int {
 	rm.mutex.Lock()
 	defer rm.mutex.Unlock()
+
+	// L-05 fix: guard against post-Stop calls, consistent with other mutating methods.
+	if rm.stopped {
+		return -1
+	}
 
 	session, exists := rm.pendingSessions[sessionID]
 	if !exists {
@@ -619,9 +632,9 @@ func (rm *RelayManager) CleanupExpired() {
 	}
 	rm.introducers = validIntroducers
 
-	// Clean old pending sessions (timeout after 30 seconds)
+	// Clean old pending sessions (timeout after the shared HolePunchSessionTimeout)
 	for sessionID, session := range rm.pendingSessions {
-		if now.Sub(session.CreatedAt) > 30*time.Second {
+		if now.Sub(session.CreatedAt) > HolePunchSessionTimeout {
 			delete(rm.pendingSessions, sessionID)
 		}
 	}

@@ -82,6 +82,10 @@ type HolePunchAttempt struct {
 
 	// RelayTag is the tag for relay communication
 	RelayTag uint32
+
+	// FailureReason stores the error passed to FailHolePunch (H-03 fix).
+	// Nil if the attempt succeeded or has not yet failed.
+	FailureReason error
 }
 
 // HolePunchState represents the state of a hole punch attempt.
@@ -225,22 +229,37 @@ func (hpc *HolePunchCoordinator) InitiateHolePunch(remoteAddr, introducerAddr *n
 			Errorf("relay tag cannot be zero")
 	}
 
-	// Generate a cryptographically random session ID to prevent collisions
-	// when the same relay tag is reused across retry attempts.
-	var sessionIDBuf [8]byte
-	if _, err := rand.Read(sessionIDBuf[:]); err != nil {
-		return 0, oops.
-			Code("SESSION_ID_GENERATION_FAILED").
-			In("holepunch_coordinator").
-			Wrapf(err, "failed to generate session ID")
-	}
-	destConnID := binary.BigEndian.Uint64(sessionIDBuf[:])
-	if destConnID == 0 {
-		destConnID = 1
-	}
-
+	// Generate a cryptographically random session ID.
+	// H-04 fix: retry on collision, consistent with InitiatePeerTest.
+	const maxSessionIDRetries = 10
+	var destConnID uint64
 	hpc.mutex.Lock()
 	defer hpc.mutex.Unlock()
+
+	for attempt := 0; attempt < maxSessionIDRetries; attempt++ {
+		var sessionIDBuf [8]byte
+		if _, err := rand.Read(sessionIDBuf[:]); err != nil {
+			return 0, oops.
+				Code("SESSION_ID_GENERATION_FAILED").
+				In("holepunch_coordinator").
+				Wrapf(err, "failed to generate session ID")
+		}
+		id := binary.BigEndian.Uint64(sessionIDBuf[:])
+		if id == 0 {
+			continue // retry; probability 1/2^64 per attempt
+		}
+		if _, exists := hpc.attempts[id]; !exists {
+			destConnID = id
+			break
+		}
+	}
+	if destConnID == 0 {
+		return 0, oops.
+			Code("SESSION_ID_EXHAUSTED").
+			In("holepunch_coordinator").
+			With("max_attempts", maxSessionIDRetries).
+			Errorf("failed to generate unique session ID after %d attempts", maxSessionIDRetries)
+	}
 
 	// Create attempt
 	attempt := &HolePunchAttempt{
@@ -413,8 +432,8 @@ func (hpc *HolePunchCoordinator) ProcessHolePunchResponse(sessionID uint64, addr
 		return err
 	}
 
-	// Verify address matches expected remote
-	if attempt.RemoteAddr.String() != addr.String() {
+	// Verify address matches expected remote (M-01 fix: use addrEqual for IPv4/IPv6 parity)
+	if !addrEqual(attempt.RemoteAddr, addr) {
 		return oops.
 			Code("ADDRESS_MISMATCH").
 			In("holepunch_coordinator").
@@ -509,7 +528,18 @@ func (hpc *HolePunchCoordinator) CompleteHolePunch(sessionID uint64) error {
 // Returns error if session not found.
 func (hpc *HolePunchCoordinator) FailHolePunch(sessionID uint64, reason error) error {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "FailHolePunch", "sessionID": sessionID, "reason": reason}).Debug("Failing hole punch")
-	return hpc.setAttemptState(sessionID, HolePunchFailed)
+	hpc.mutex.Lock()
+	defer hpc.mutex.Unlock()
+
+	attempt, err := hpc.validateAndGetAttempt(sessionID)
+	if err != nil {
+		return err
+	}
+
+	// H-03 fix: persist the reason so callers can inspect it via GetAttempt.
+	attempt.State = HolePunchFailed
+	attempt.FailureReason = reason
+	return nil
 }
 
 // GetAttempt retrieves hole punch attempt information.
@@ -531,16 +561,25 @@ func (hpc *HolePunchCoordinator) GetAttempt(sessionID uint64) *HolePunchAttempt 
 		return nil
 	}
 
-	// Return defensive copy
-	return &HolePunchAttempt{
-		SessionID:  attempt.SessionID,
-		RemoteAddr: attempt.RemoteAddr,
-		Introducer: attempt.Introducer,
-		State:      attempt.State,
-		StartTime:  attempt.StartTime,
-		Retries:    attempt.Retries,
-		RelayTag:   attempt.RelayTag,
+	// Return defensive copy — H-02 fix: deep-copy pointer fields to prevent
+	// callers from mutating internal state without holding the mutex.
+	c := &HolePunchAttempt{
+		SessionID:     attempt.SessionID,
+		State:         attempt.State,
+		StartTime:     attempt.StartTime,
+		Retries:       attempt.Retries,
+		RelayTag:      attempt.RelayTag,
+		FailureReason: attempt.FailureReason, // H-03 fix: copy reason
 	}
+	if attempt.RemoteAddr != nil {
+		a := *attempt.RemoteAddr
+		c.RemoteAddr = &a
+	}
+	if attempt.Introducer != nil {
+		a := *attempt.Introducer
+		c.Introducer = &a
+	}
+	return c
 }
 
 // RemoveAttempt removes a hole punch attempt from tracking.
@@ -568,10 +607,9 @@ func (hpc *HolePunchCoordinator) CleanupExpired() {
 	defer hpc.mutex.Unlock()
 
 	now := time.Now()
-	timeout := 30 * time.Second
 
 	for sessionID, attempt := range hpc.attempts {
-		if now.Sub(attempt.StartTime) > timeout {
+		if now.Sub(attempt.StartTime) > HolePunchSessionTimeout {
 			delete(hpc.attempts, sessionID)
 			hpc.manager.RemovePendingSession(sessionID)
 		}

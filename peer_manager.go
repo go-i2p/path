@@ -161,8 +161,10 @@ type PeerTest struct {
 	// StartTime is when the test was initiated
 	StartTime time.Time
 
-	// Timeouts tracks timeout times for each message
-	Timeouts []time.Time
+	// Deadline is when the overall test must complete (60 s per I2P spec).
+	// M-04 fix: replaced Timeouts []time.Time (7 entries, only [0] ever set)
+	// with a single Deadline field to eliminate the misleading dead state.
+	Deadline time.Time
 
 	// NATType is the determined NAT type
 	NATType NATType
@@ -252,6 +254,8 @@ func (ptm *PeerTestManager) InitiatePeerTest(bobAddr *net.UDPAddr) (uint32, erro
 	defer ptm.mutex.Unlock()
 
 	// Retry nonce generation on collision (extremely unlikely but safe).
+	// M-02 fix: skip zero by retrying instead of substituting 1, so that
+	// value 1 retains the same probability as every other non-zero nonce.
 	const maxRetries = 10
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		var nonceBytes [4]byte
@@ -263,7 +267,7 @@ func (ptm *PeerTestManager) InitiatePeerTest(bobAddr *net.UDPAddr) (uint32, erro
 		}
 		nonce = binary.BigEndian.Uint32(nonceBytes[:])
 		if nonce == 0 {
-			nonce = 1
+			continue // retry; probability 1/2^32 per attempt
 		}
 		if _, exists := ptm.tests[nonce]; !exists {
 			break
@@ -301,11 +305,8 @@ func (ptm *PeerTestManager) InitiatePeerTest(bobAddr *net.UDPAddr) (uint32, erro
 		State:            TestRequested,
 		BobAddr:          bobAddr,
 		StartTime:        time.Now(),
-		Timeouts:         make([]time.Time, 7), // 7 messages in protocol
+		Deadline:         time.Now().Add(60 * time.Second), // 60 s per I2P spec
 	}
-
-	// Set timeout for first message (60 seconds per I2P spec)
-	test.Timeouts[0] = time.Now().Add(60 * time.Second)
 
 	ptm.tests[nonce] = test
 
@@ -653,7 +654,7 @@ func (ptm *PeerTestManager) CreateRelayTest(nonce uint32, aliceAddr, charlieAddr
 		AliceAddr:   aliceAddr,
 		CharlieAddr: charlieAddr,
 		StartTime:   time.Now(),
-		Timeouts:    make([]time.Time, 7),
+		Deadline:    time.Now().Add(60 * time.Second),
 	}
 
 	ptm.tests[nonce] = test
@@ -717,7 +718,7 @@ func (ptm *PeerTestManager) CreateResponderTest(nonce uint32, aliceAddr, bobAddr
 		AliceAddr: aliceAddr,
 		BobAddr:   bobAddr,
 		StartTime: time.Now(),
-		Timeouts:  make([]time.Time, 7),
+		Deadline:  time.Now().Add(60 * time.Second),
 	}
 
 	ptm.tests[nonce] = test
@@ -821,13 +822,18 @@ func (ptm *PeerTestManager) SetTestStartTime(nonce uint32, t time.Time) {
 	}
 }
 
-// NewPeerTestManagerWithFields creates a PeerTestManager with pre-populated fields (for testing).
+// NewPeerTestManagerWithFields creates a PeerTestManager with pre-populated fields.
+// Intended for integration tests only — does NOT start the background cleanup
+// goroutine. Long-running tests must call CleanupExpired manually or use
+// NewPeerTestManager instead.
+// H-01 fix: pendingResults is always initialised to prevent nil-map panic in CompleteTest.
 func NewPeerTestManagerWithFields(listener ListenerRef, tests map[uint32]*PeerTest, results map[string]*TestResult) *PeerTestManager {
 	ptm := &PeerTestManager{
-		listener: listener,
-		tests:    tests,
-		results:  results,
-		stopCh:   make(chan struct{}),
+		listener:       listener,
+		tests:          tests,
+		results:        results,
+		pendingResults: make(map[uint32]*TestResult),
+		stopCh:         make(chan struct{}),
 	}
 	return ptm
 }
