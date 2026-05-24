@@ -97,14 +97,9 @@ func VerifyRelayRequestSignature(
 	if !verifyData(publicKey, data, signature) {
 		return false, nil
 	}
-	// BUG-004 fix: zero timestamp means the field was never set, not a skew violation.
-	if timestamp == 0 {
-		return false, oops.Errorf("relay request timestamp not set (zero)")
-	}
-	// L-5: Reject replayed or severely clock-skewed blocks.
-	age := time.Since(time.Unix(int64(timestamp), 0))
-	if age > MaxClockSkew || age < -MaxClockSkew {
-		return false, oops.Errorf("relay request timestamp outside allowed skew window (%v)", age)
+	// BUG-004 / L-5: reject zero or skewed timestamps.
+	if err := checkTimestampSkew(timestamp, "relay request"); err != nil {
+		return false, err
 	}
 	return true, nil
 }
@@ -185,14 +180,26 @@ func VerifyRelayResponseSignature(
 	if !verifyData(publicKey, data, signature) {
 		return false, nil
 	}
-	// BUG-004 fix: zero timestamp means the field was never set, not a skew violation.
-	if timestamp == 0 {
-		return false, oops.Errorf("relay response timestamp not set (zero)")
-	}
-	// L-5: Reject replayed or severely clock-skewed blocks.
-	age := time.Since(time.Unix(int64(timestamp), 0))
-	if age > MaxClockSkew || age < -MaxClockSkew {
-		return false, oops.Errorf("relay response timestamp outside allowed skew window (%v)", age)
+	// BUG-004 / L-5: reject zero or skewed timestamps.
+	if err := checkTimestampSkew(timestamp, "relay response"); err != nil {
+		return false, err
 	}
 	return true, nil
+}
+
+// checkTimestampSkew validates that a uint32 Unix timestamp is non-zero and
+// within MaxClockSkew of the current time. Returns a descriptive error on
+// failure, or nil if the timestamp is acceptable.
+//
+// This helper centralises the security-critical clock-skew check that is
+// applied identically to relay request, relay response, and peer test blocks.
+func checkTimestampSkew(timestamp uint32, label string) error {
+	if timestamp == 0 {
+		return oops.Errorf("%s timestamp not set (zero)", label)
+	}
+	age := time.Since(time.Unix(int64(timestamp), 0))
+	if age > MaxClockSkew || age < -MaxClockSkew {
+		return oops.Errorf("%s timestamp outside allowed skew window (%v)", label, age)
+	}
+	return nil
 }

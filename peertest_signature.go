@@ -3,7 +3,6 @@ package ssu2path
 import (
 	"crypto/ed25519"
 	"net"
-	"time"
 
 	"github.com/go-i2p/common/data"
 	"github.com/go-i2p/logger"
@@ -96,14 +95,9 @@ func VerifyPeerTestSignature(
 	if !verifyData(publicKey, data, signature) {
 		return false, nil
 	}
-	// BUG-004 fix: zero timestamp means the field was never set, not a skew violation.
-	if timestamp == 0 {
-		return false, oops.Errorf("peer test timestamp not set (zero)")
-	}
-	// L-5: Reject replayed or severely clock-skewed blocks.
-	age := time.Since(time.Unix(int64(timestamp), 0))
-	if age > MaxClockSkew || age < -MaxClockSkew {
-		return false, oops.Errorf("peer test timestamp outside allowed skew window (%v)", age)
+	// BUG-004 / L-5: reject zero or skewed timestamps.
+	if err := checkTimestampSkew(timestamp, "peer test"); err != nil {
+		return false, err
 	}
 	return true, nil
 }
