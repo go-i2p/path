@@ -2,7 +2,7 @@ module github.com/go-i2p/path
 
 go 1.26.1
 
-replace github.com/go-i2p/go-noise => ../go-noise
+//replace github.com/go-i2p/go-noise => ../go-noise
 
 require (
 	github.com/go-i2p/common v0.1.55
