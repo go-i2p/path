@@ -12,6 +12,14 @@ import (
 	"github.com/samber/oops"
 )
 
+// PendingSessionRegistry is the relay dependency of HolePunchCoordinator.
+// *RelayManager satisfies this interface.
+type PendingSessionRegistry interface {
+	AddPendingSession(sessionID uint64, remoteAddr, introducerAddr *net.UDPAddr, relayTag uint32) error
+	IncrementRetries(sessionID uint64) int
+	RemovePendingSession(sessionID uint64)
+}
+
 // HolePunchCoordinator coordinates UDP hole punching for NAT traversal.
 // It manages hole punch attempts with state tracking, retries, and timeout handling.
 //
@@ -30,8 +38,8 @@ import (
 //
 // Thread Safety: All public methods are thread-safe.
 type HolePunchCoordinator struct {
-	// manager is the parent RelayManager
-	manager *RelayManager
+	// manager is the pending session registry (typically *RelayManager)
+	manager PendingSessionRegistry
 
 	// attempts maps session ID to hole punch attempt
 	attempts map[uint64]*HolePunchAttempt
@@ -121,11 +129,11 @@ func (s HolePunchState) String() string {
 // cryptographically authenticated, so a nil verifier is a programming error.
 //
 // Parameters:
-//   - manager: The RelayManager to coordinate with
+//   - manager: The PendingSessionRegistry to coordinate with (typically *RelayManager)
 //   - verifyFn: Function to verify HolePunch message signatures (MUST NOT be nil)
 //
 // Returns a new HolePunchCoordinator, or an error if verifyFn is nil.
-func NewHolePunchCoordinator(manager *RelayManager, verifyFn func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error) (*HolePunchCoordinator, error) {
+func NewHolePunchCoordinator(manager PendingSessionRegistry, verifyFn func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error) (*HolePunchCoordinator, error) {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "NewHolePunchCoordinator"}).Debug("Creating new HolePunchCoordinator")
 	if verifyFn == nil {
 		return nil, oops.Errorf("hole punch signature verifier cannot be nil - required by SSU2 spec")
