@@ -13,25 +13,45 @@ import (
 )
 
 // createTestHolePunchCoordinator creates a HolePunchCoordinator for testing.
+// BUG-M02 fix: Now provides a default no-op signature verifier since it's
+// mandatory at construction.
 func createTestHolePunchCoordinator(t *testing.T) *HolePunchCoordinator {
 	t.Helper()
 
 	// Create relay manager (nil listener is sufficient for path package tests)
 	manager := NewRelayManager(nil)
 
-	// Create coordinator
-	return NewHolePunchCoordinator(manager)
+	// Provide a default verifier that accepts all signatures (for testing)
+	verifyFn := func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
+		return nil
+	}
+
+	// Create coordinator with mandatory verifier
+	return NewHolePunchCoordinator(manager, verifyFn)
 }
 
 func TestNewHolePunchCoordinator(t *testing.T) {
 	manager := NewRelayManager(nil)
 
-	hpc := NewHolePunchCoordinator(manager)
+	verifyFn := func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
+		return nil
+	}
+
+	hpc := NewHolePunchCoordinator(manager, verifyFn)
 
 	assert.NotNil(t, hpc)
 	assert.Equal(t, manager, hpc.manager)
 	assert.NotNil(t, hpc.attempts)
 	assert.Equal(t, 0, len(hpc.attempts))
+}
+
+func TestNewHolePunchCoordinator_NilVerifierPanics(t *testing.T) {
+	manager := NewRelayManager(nil)
+
+	// BUG-M02 fix: Verify that nil verifier panics at construction
+	assert.Panics(t, func() {
+		NewHolePunchCoordinator(manager, nil)
+	}, "Expected panic when verifier is nil")
 }
 
 func TestHolePunchCoordinator_InitiateHolePunch(t *testing.T) {
@@ -688,11 +708,7 @@ func TestHolePunchCoordinator_ConcurrentOperations(t *testing.T) {
 
 func TestHolePunchCoordinator_HandleHolePunch_WithSignatureVerification(t *testing.T) {
 	hpc := createTestHolePunchCoordinator(t)
-
-	// Set up a verifier that accepts all
-	hpc.SetVerifyHolePunchSignature(func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
-		return nil
-	})
+	// BUG-M02 fix: Verifier is now set at construction via createTestHolePunchCoordinator
 
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8887}
 	introducerAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.2"), Port: 8888}
@@ -716,14 +732,16 @@ func TestHolePunchCoordinator_HandleHolePunch_WithSignatureVerification(t *testi
 }
 
 func TestHolePunchCoordinator_HandleHolePunch_SignatureVerificationFails(t *testing.T) {
-	hpc := createTestHolePunchCoordinator(t)
+	manager := NewRelayManager(nil)
 
-	// Set up a verifier that rejects
-	hpc.SetVerifyHolePunchSignature(func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
+	// BUG-M02 fix: Create coordinator with a verifier that rejects all signatures
+	verifyFn := func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
 		return oops.
 			Code("BAD_SIGNATURE").
 			Errorf("invalid signature")
-	})
+	}
+	hpc := NewHolePunchCoordinator(manager, verifyFn)
+	defer hpc.Stop()
 
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8887}
 	introducerAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.2"), Port: 8888}
@@ -743,25 +761,5 @@ func TestHolePunchCoordinator_HandleHolePunch_SignatureVerificationFails(t *test
 	assert.Contains(t, err.Error(), "signature verification failed")
 }
 
-func TestHolePunchCoordinator_HandleHolePunch_VerifierNotConfigured(t *testing.T) {
-	hpc := createTestHolePunchCoordinator(t)
-	// VerifyHolePunchSignature is nil (default)
-
-	remoteAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8887}
-	introducerAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.2"), Port: 8888}
-	relayTag := uint32(0xABCD1234)
-
-	sessionID, err := hpc.InitiateHolePunch(remoteAddr, introducerAddr, relayTag)
-	require.NoError(t, err)
-
-	block := &RelayIntroBlock{
-		AliceRouterHash: make([]byte, 32),
-		Nonce:           relayTag,
-		Signature:       make([]byte, 64),
-	}
-	fromAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.3"), Port: 8889}
-	// With a block but no verifier configured, should reject
-	err = hpc.HandleHolePunch(sessionID, fromAddr, block, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "verifier not configured")
-}
+// BUG-M02 fix: TestHolePunchCoordinator_HandleHolePunch_VerifierNotConfigured removed
+// because verifier is now mandatory at construction - this error case is impossible.

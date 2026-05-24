@@ -10,7 +10,15 @@ import (
 
 // normalizeIP converts the given IP into its compact byte form and returns
 // the corresponding address-size field value per SSU2 spec (6 for IPv4, 18
-// for IPv6). A nil IP is valid and returns (nil, 0, nil).
+// for IPv6).
+//
+// Return value contract (BUG-L08):
+//   - ip == nil: returns (nil, 0, nil) — valid case for optional addresses
+//   - ip is IPv4: returns (4-byte slice, 6, nil)
+//   - ip is IPv6: returns (16-byte slice, 18, nil)
+//   - ip is non-nil but invalid: returns (nil, 0, error)
+//
+// Callers MUST check asz == 0 to distinguish nil input from invalid IP.
 func normalizeIP(ip net.IP) (ipBytes []byte, asz uint8, err error) {
 	if ip == nil {
 		return nil, 0, nil

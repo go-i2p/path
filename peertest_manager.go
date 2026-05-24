@@ -267,6 +267,9 @@ func (ptm *PeerTestManager) Stop() {
 }
 
 // cleanupLoop periodically removes expired peer tests.
+// BUG-L04: 60-second interval matches I2P SSU2 spec §Peer Test timeout.
+// Peer tests use 7 messages and involve 3 parties (Alice, Bob, Charlie),
+// so longer timeout than hole punch (30s) or path validation (10s).
 func (ptm *PeerTestManager) cleanupLoop() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
@@ -329,11 +332,24 @@ func (ptm *PeerTestManager) InitiatePeerTest(bobAddr *net.UDPAddr) (uint32, erro
 		if _, exists := ptm.tests[nonce]; !exists {
 			break
 		}
+		// BUG-M05 fix: Log collision at WARN level with diagnostic info
+		log.WithFields(logger.Fields{
+			"pkg":          "ssu2",
+			"func":         "InitiatePeerTest",
+			"attempt":      attempt + 1,
+			"active_tests": len(ptm.tests),
+			"load_factor":  float64(len(ptm.tests)) / float64(1<<32) * 100,
+		}).Warn("Peer test nonce collision detected - retrying")
+
 		if attempt == maxRetries-1 {
+			// BUG-M05 fix: Include diagnostic info in error for debugging
 			return 0, oops.
 				Code("NONCE_EXHAUSTED").
 				In("peertest_manager").
-				Errorf("failed to generate unique nonce after %d attempts", maxRetries)
+				With("active_tests", len(ptm.tests)).
+				With("max_attempts", maxRetries).
+				Errorf("failed to generate unique nonce after %d attempts (active tests: %d, load factor: %.6f%%)",
+					maxRetries, len(ptm.tests), float64(len(ptm.tests))/float64(1<<32)*100)
 		}
 	}
 

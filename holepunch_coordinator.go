@@ -26,6 +26,7 @@ import (
 // - Maximum 3 retry attempts per I2P convention
 // - 30-second timeout per attempt (I2P spec recommendation)
 // - State machine: Requested → Sent → Waiting → Success/Failed
+// - Signature verification is MANDATORY per SSU2 spec and must be provided at construction
 //
 // Thread Safety: All public methods are thread-safe.
 type HolePunchCoordinator struct {
@@ -35,10 +36,10 @@ type HolePunchCoordinator struct {
 	// attempts maps session ID to hole punch attempt
 	attempts map[uint64]*HolePunchAttempt
 
-	// verifyHolePunchSignature is called to verify incoming HolePunch messages.
+	// verifyHolePunchSignatureFn is called to verify incoming HolePunch messages.
 	// Per SSU2 spec §Hole Punch, messages transiting through a relay MUST be
-	// authenticated cryptographically. If nil, incoming messages are rejected.
-	// Set via SetVerifyHolePunchSignature to ensure thread safety.
+	// authenticated cryptographically. This field is set at construction and
+	// is immutable to prevent misconfiguration.
 	verifyHolePunchSignatureFn func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error
 
 	// stopCh is closed by Stop() to signal the cleanup goroutine to exit.
@@ -115,16 +116,25 @@ func (s HolePunchState) String() string {
 
 // NewHolePunchCoordinator creates a new HolePunchCoordinator.
 //
+// BUG-M02 fix: Signature verifier is now mandatory at construction to prevent
+// misconfiguration. Per SSU2 spec §Hole Punch, all messages must be
+// cryptographically authenticated.
+//
 // Parameters:
 //   - manager: The RelayManager to coordinate with
+//   - verifyFn: Function to verify HolePunch message signatures (MUST NOT be nil)
 //
-// Returns a new HolePunchCoordinator with empty state.
-func NewHolePunchCoordinator(manager *RelayManager) *HolePunchCoordinator {
+// Returns a new HolePunchCoordinator with empty state, or panics if verifyFn is nil.
+func NewHolePunchCoordinator(manager *RelayManager, verifyFn func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error) *HolePunchCoordinator {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "NewHolePunchCoordinator"}).Debug("Creating new HolePunchCoordinator")
+	if verifyFn == nil {
+		panic("hole punch signature verifier cannot be nil - required by SSU2 spec")
+	}
 	hpc := &HolePunchCoordinator{
-		manager:  manager,
-		attempts: make(map[uint64]*HolePunchAttempt),
-		stopCh:   make(chan struct{}),
+		manager:                    manager,
+		attempts:                   make(map[uint64]*HolePunchAttempt),
+		verifyHolePunchSignatureFn: verifyFn,
+		stopCh:                     make(chan struct{}),
 	}
 	go hpc.cleanupLoop()
 	return hpc
@@ -137,6 +147,8 @@ func (hpc *HolePunchCoordinator) Stop() {
 }
 
 // cleanupLoop periodically removes expired hole punch attempts.
+// BUG-L04: 30-second interval matches I2P SSU2 spec §Hole Punch timeout.
+// Each attempt expires after 30s, so cleanup runs at same frequency.
 func (hpc *HolePunchCoordinator) cleanupLoop() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -173,11 +185,29 @@ func (hpc *HolePunchCoordinator) InitiateHolePunch(remoteAddr, introducerAddr *n
 			Errorf("remote address cannot be nil")
 	}
 
+	// BUG-L01 fix: Validate remote address port
+	if !IsValidSourcePort(remoteAddr) {
+		return 0, oops.
+			Code("INVALID_PORT").
+			In("holepunch_coordinator").
+			With("port", remoteAddr.Port).
+			Errorf("remote address has invalid source port %d", remoteAddr.Port)
+	}
+
 	if introducerAddr == nil {
 		return 0, oops.
 			Code("INVALID_ADDRESS").
 			In("holepunch_coordinator").
 			Errorf("introducer address cannot be nil")
+	}
+
+	// BUG-L01 fix: Validate introducer address port
+	if !IsValidSourcePort(introducerAddr) {
+		return 0, oops.
+			Code("INVALID_PORT").
+			In("holepunch_coordinator").
+			With("port", introducerAddr.Port).
+			Errorf("introducer address has invalid source port %d", introducerAddr.Port)
 	}
 
 	if relayTag == 0 {
@@ -247,6 +277,16 @@ func (hpc *HolePunchCoordinator) lookupAttempt(sessionID uint64, addr *net.UDPAd
 			Errorf("%s address cannot be nil", addrLabel)
 	}
 
+	// BUG-L01 fix: Validate port if address is non-nil
+	if addr != nil && !IsValidSourcePort(addr) {
+		return nil, oops.
+			Code("INVALID_PORT").
+			In("holepunch_coordinator").
+			With("port", addr.Port).
+			With("label", addrLabel).
+			Errorf("%s address has invalid source port %d", addrLabel, addr.Port)
+	}
+
 	attempt, exists := hpc.attempts[sessionID]
 	if !exists {
 		return nil, oops.
@@ -280,16 +320,9 @@ func (hpc *HolePunchCoordinator) SendHolePunch(sessionID uint64, targetAddr *net
 	return nil
 }
 
-// SetVerifyHolePunchSignature sets the signature verification function.
-// This method is thread-safe; use it instead of assigning the field directly.
-func (hpc *HolePunchCoordinator) SetVerifyHolePunchSignature(fn func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error) {
-	hpc.mutex.Lock()
-	defer hpc.mutex.Unlock()
-	hpc.verifyHolePunchSignatureFn = fn
-}
-
 // verifyHolePunchSignatureInternal validates the block signature using the
 // configured verifier. Per SSU2 spec §Hole Punch, signatures are mandatory.
+// The verifier function is guaranteed to be non-nil (checked at construction).
 func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
 	if block == nil {
 		log.WithFields(logger.Fields{
@@ -303,13 +336,7 @@ func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, bloc
 			With("session_id", sessionID).
 			Errorf("hole punch block cannot be nil - signature verification required per SSU2 spec")
 	}
-	if hpc.verifyHolePunchSignatureFn == nil {
-		return oops.
-			Code("VERIFICATION_NOT_CONFIGURED").
-			In("holepunch_coordinator").
-			With("session_id", sessionID).
-			Errorf("hole punch signature verifier not configured")
-	}
+	// BUG-M02 fix: verifier is guaranteed non-nil at construction, no need to check
 	if err := hpc.verifyHolePunchSignatureFn(block, signerKey); err != nil {
 		return oops.
 			Code("SIGNATURE_VERIFICATION_FAILED").

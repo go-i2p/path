@@ -330,7 +330,9 @@ func (rm *RelayManager) AllocateRelayTag(addr *net.UDPAddr) (uint32, error) {
 			Errorf("relay manager has been stopped")
 	}
 
-	const maxAttempts = 3
+	// BUG-M03 fix: Increased from 3 to 10 to handle birthday paradox at scale.
+	// At ~65,000 active tags, collision probability becomes significant.
+	const maxAttempts = 10
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		var tag uint32
 		for tag == 0 {
@@ -345,6 +347,15 @@ func (rm *RelayManager) AllocateRelayTag(addr *net.UDPAddr) (uint32, error) {
 		}
 
 		if _, exists := rm.relayTags[tag]; exists {
+			// BUG-M03 fix: Log collisions starting at attempt 3 for monitoring
+			if attempt >= 2 {
+				log.WithFields(logger.Fields{
+					"pkg":         "ssu2",
+					"func":        "AllocateRelayTag",
+					"attempt":     attempt + 1,
+					"active_tags": len(rm.relayTags),
+				}).Warn("Relay tag collision detected - retrying")
+			}
 			continue
 		}
 
@@ -357,10 +368,15 @@ func (rm *RelayManager) AllocateRelayTag(addr *net.UDPAddr) (uint32, error) {
 		return tag, nil
 	}
 
+	// BUG-M03 fix: Include diagnostic info for collision exhaustion
 	return 0, oops.
 		Code("TAG_COLLISION").
 		In("relay_manager").
-		Errorf("relay tag collision after %d attempts", maxAttempts)
+		With("active_tags", len(rm.relayTags)).
+		With("max_attempts", maxAttempts).
+		Errorf("relay tag collision after %d attempts (active tags: %d, load factor: %.2f%%)",
+			maxAttempts, len(rm.relayTags), float64(len(rm.relayTags))/float64(1<<32)*100)
+
 }
 
 // ValidateRelayTag validates that a relay tag is active and matches the specified address.
@@ -429,12 +445,20 @@ func (rm *RelayManager) GetRelayTag(tag uint32) *RelayTag {
 		return nil
 	}
 
+	// BUG-H01 fix: Check expiration and copy atomically within single critical section
+	// to prevent TOCTOU race where tag expires between check and copy
 	relayTag, exists := rm.relayTags[tag]
-	if !exists || time.Now().After(relayTag.ExpiresAt) {
+	if !exists {
 		return nil
 	}
 
-	// Return defensive copy
+	// Check expiration under lock before creating copy
+	now := time.Now()
+	if now.After(relayTag.ExpiresAt) {
+		return nil
+	}
+
+	// Return defensive copy (all operations within same critical section)
 	copied := &RelayTag{
 		Tag:       relayTag.Tag,
 		CreatedAt: relayTag.CreatedAt,

@@ -2,6 +2,7 @@ package ssu2path
 
 import (
 	"net"
+	"time"
 
 	"github.com/samber/oops"
 )
@@ -171,6 +172,9 @@ func AnalyzeProbeResults(directSuccess, relayedSuccess bool, addr1, addr2 *net.U
 
 	// Set reachability based on probe success
 	result.Reachable = directSuccess
+
+	// BUG-L09 fix: Initialize TestTime to current time
+	result.TestTime = time.Now()
 
 	return result
 }

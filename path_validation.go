@@ -1,5 +1,15 @@
 // Package ssu2 provides SSU2-specific implementations for the Noise Protocol Framework
 // supporting I2P's SSU2 transport protocol with UDP-based connections and NAT traversal.
+//
+// # Resource Management
+//
+// This package creates managers with background goroutines for cleanup and maintenance:
+//   - HolePunchCoordinator (cleanup every 30s)
+//   - PeerTestManager (cleanup every 60s)
+//   - RelayManager (cleanup timer-based)
+//
+// IMPORTANT: Callers MUST call Stop() on these managers when done to prevent goroutine leaks.
+// Failure to call Stop() will cause background goroutines to run until process termination.
 package ssu2path
 
 import (
@@ -49,6 +59,14 @@ type PathValidator struct {
 	// discoveredMTU is the largest packet size that received a response
 	// during MTU probing. 0 means no probe has completed yet.
 	discoveredMTU int
+
+	// stopCh is closed by Stop() to signal the cleanup goroutine to exit.
+	// BUG-M07 fix: Added to enable proper resource cleanup
+	stopCh chan struct{}
+
+	// stopOnce ensures Stop() is idempotent and cannot panic on double-call.
+	// BUG-M07 fix: Added to enable proper resource cleanup
+	stopOnce sync.Once
 
 	// mutex protects the challenges map and discoveredMTU
 	mutex sync.RWMutex
@@ -125,10 +143,15 @@ func (s PathChallengeState) String() string {
 
 // Path validation timeouts
 const (
-	// PathValidationTimeout is how long to wait for path response
+	// PathValidationTimeout is how long to wait for path response.
+	// BUG-L04: 10 seconds chosen per I2P SSU2 spec §Connection Migration.
+	// Shorter than hole punch (30s) and peer test (60s) because path
+	// validation occurs mid-connection and requires tighter feedback.
 	PathValidationTimeout = 10 * time.Second
 
-	// PathValidationCleanupInterval is how often to clean up expired challenges
+	// PathValidationCleanupInterval is how often to clean up expired challenges.
+	// BUG-L04: 30 seconds = 3× PathValidationTimeout, balancing cleanup cost
+	// against memory pressure from abandoned challenges (added in BUG-M07 fix).
 	PathValidationCleanupInterval = 30 * time.Second
 )
 
@@ -146,15 +169,43 @@ const (
 
 // NewPathValidator creates a new path validator for a connection.
 //
+// BUG-M07 fix: Now starts a background cleanup goroutine. Callers MUST call
+// Stop() when done to prevent goroutine leaks (see package-level documentation).
+//
 // Parameters:
 //   - conn: The connection to manage path validation for
 //
 // Returns an initialized validator.
 func NewPathValidator(conn PathValidationConn) *PathValidator {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "NewPathValidator"}).Debug("Creating new PathValidator")
-	return &PathValidator{
+	pv := &PathValidator{
 		conn:       conn,
 		challenges: make(map[uint64]*PathChallenge),
+		stopCh:     make(chan struct{}),
+	}
+	go pv.cleanupLoop()
+	return pv
+}
+
+// Stop halts the background cleanup goroutine. Call when the validator is
+// no longer needed to avoid goroutine leaks. Safe to call multiple times.
+// BUG-M07 fix: Added to mirror RelayManager/HolePunchCoordinator pattern.
+func (pv *PathValidator) Stop() {
+	pv.stopOnce.Do(func() { close(pv.stopCh) })
+}
+
+// cleanupLoop periodically removes expired path validation challenges.
+// BUG-M07 fix: Added to prevent challenges from persisting indefinitely.
+func (pv *PathValidator) cleanupLoop() {
+	ticker := time.NewTicker(PathValidationCleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			pv.CleanupExpired()
+		case <-pv.stopCh:
+			return
+		}
 	}
 }
 
@@ -736,7 +787,17 @@ func (pv *PathValidator) RunPMTUD(ctx context.Context, addr *net.UDPAddr, low, h
 	best := low
 
 	for low+MTUProbeStep <= high {
-		mid := (low + high) / 2
+		// BUG-M06 fix: Check context cancellation before each probe to avoid
+		// unnecessary work and ensure timely cancellation response
+		select {
+		case <-ctx.Done():
+			return best
+		default:
+		}
+
+		// BUG-M04 fix: Use overflow-safe binary search calculation
+		// mid := (low + high) / 2 could overflow if low + high > MaxInt32
+		mid := low + (high-low)/2
 
 		id, err := pv.InitiateMTUProbe(addr, mid)
 		if err != nil {
