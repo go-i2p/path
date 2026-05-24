@@ -3,6 +3,7 @@ package ssu2path
 import (
 	"crypto/ed25519"
 	"net"
+	"time"
 
 	"github.com/go-i2p/common/data"
 	"github.com/go-i2p/logger"
@@ -92,5 +93,13 @@ func VerifyPeerTestSignature(
 	if err != nil {
 		return false, oops.Wrapf(err, "failed to build peer test signed data for verification")
 	}
-	return verifyData(publicKey, data, signature), nil
+	if !verifyData(publicKey, data, signature) {
+		return false, nil
+	}
+	// L-5: Reject replayed or severely clock-skewed blocks.
+	age := time.Since(time.Unix(int64(timestamp), 0))
+	if age > MaxClockSkew || age < -MaxClockSkew {
+		return false, oops.Errorf("peer test timestamp outside allowed skew window (%v)", age)
+	}
+	return true, nil
 }

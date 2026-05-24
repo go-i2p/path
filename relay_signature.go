@@ -3,11 +3,16 @@ package ssu2path
 import (
 	"crypto/ed25519"
 	"net"
+	"time"
 
 	"github.com/go-i2p/common/data"
 	"github.com/go-i2p/logger"
 	"github.com/samber/oops"
 )
+
+// MaxClockSkew is the maximum allowed age (or future offset) of a signed timestamp.
+// Blocks outside this window are rejected to prevent replay attacks.
+const MaxClockSkew = 5 * time.Minute
 
 // Relay signature prologues per SSU2 spec §Relay Request and §Relay Response.
 const (
@@ -89,7 +94,15 @@ func VerifyRelayRequestSignature(
 	if err != nil {
 		return false, oops.Wrapf(err, "failed to build relay request signed data for verification")
 	}
-	return verifyData(publicKey, data, signature), nil
+	if !verifyData(publicKey, data, signature) {
+		return false, nil
+	}
+	// L-5: Reject replayed or severely clock-skewed blocks.
+	age := time.Since(time.Unix(int64(timestamp), 0))
+	if age > MaxClockSkew || age < -MaxClockSkew {
+		return false, oops.Errorf("relay request timestamp outside allowed skew window (%v)", age)
+	}
+	return true, nil
 }
 
 // BuildRelayResponseSignedData constructs the data to be signed for a relay response.
@@ -165,5 +178,13 @@ func VerifyRelayResponseSignature(
 	if err != nil {
 		return false, oops.Wrapf(err, "failed to build relay response signed data for verification")
 	}
-	return verifyData(publicKey, data, signature), nil
+	if !verifyData(publicKey, data, signature) {
+		return false, nil
+	}
+	// L-5: Reject replayed or severely clock-skewed blocks.
+	age := time.Since(time.Unix(int64(timestamp), 0))
+	if age > MaxClockSkew || age < -MaxClockSkew {
+		return false, oops.Errorf("relay response timestamp outside allowed skew window (%v)", age)
+	}
+	return true, nil
 }

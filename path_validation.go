@@ -778,9 +778,11 @@ func (pv *PathValidator) waitForProbeResult(ctx context.Context, id uint64) bool
 		pv.FailPath(id, ctx.Err())
 		return false
 	case <-ch.done:
-		// Check final state
-		ch2, exists2 := pv.GetChallenge(id)
-		return exists2 && ch2.State == ChallengeValidated
+		// done is closed on both success (ChallengeValidated) and failure (ChallengeFailed).
+		// For MTU probes the challenge is deleted from the map on completion (M-1 fix),
+		// so re-fetching with GetChallenge would find nothing. Instead, check whether
+		// discoveredMTU reached the probe size — it is only updated on success. (H-1 fix)
+		return pv.GetDiscoveredMTU() >= ch.ProbeSize
 	case <-timer.C:
 		// Timeout - probe failed
 		return false
