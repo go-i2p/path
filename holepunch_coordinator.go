@@ -116,19 +116,19 @@ func (s HolePunchState) String() string {
 
 // NewHolePunchCoordinator creates a new HolePunchCoordinator.
 //
-// BUG-M02 fix: Signature verifier is now mandatory at construction to prevent
-// misconfiguration. Per SSU2 spec §Hole Punch, all messages must be
-// cryptographically authenticated.
+// L-3 fix: Returns an error instead of panicking on nil verifyFn, following
+// Go constructor conventions. Per SSU2 spec §Hole Punch, all messages must be
+// cryptographically authenticated, so a nil verifier is a programming error.
 //
 // Parameters:
 //   - manager: The RelayManager to coordinate with
 //   - verifyFn: Function to verify HolePunch message signatures (MUST NOT be nil)
 //
-// Returns a new HolePunchCoordinator with empty state, or panics if verifyFn is nil.
-func NewHolePunchCoordinator(manager *RelayManager, verifyFn func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error) *HolePunchCoordinator {
+// Returns a new HolePunchCoordinator, or an error if verifyFn is nil.
+func NewHolePunchCoordinator(manager *RelayManager, verifyFn func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error) (*HolePunchCoordinator, error) {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "NewHolePunchCoordinator"}).Debug("Creating new HolePunchCoordinator")
 	if verifyFn == nil {
-		panic("hole punch signature verifier cannot be nil - required by SSU2 spec")
+		return nil, oops.Errorf("hole punch signature verifier cannot be nil - required by SSU2 spec")
 	}
 	hpc := &HolePunchCoordinator{
 		manager:                    manager,
@@ -137,7 +137,7 @@ func NewHolePunchCoordinator(manager *RelayManager, verifyFn func(block *RelayIn
 		stopCh:                     make(chan struct{}),
 	}
 	go hpc.cleanupLoop()
-	return hpc
+	return hpc, nil
 }
 
 // Stop halts the background cleanup goroutine. Call when the coordinator

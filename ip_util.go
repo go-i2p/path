@@ -60,7 +60,12 @@ func uint16Bytes(v uint16) []byte {
 }
 
 // buildAddrSuffix builds the asz+port+ip suffix used in relay/peertest signatures.
+// L-6 fix: returns an error when ip is nil to prevent a 3-byte truncated suffix
+// that would cause remote signature verification to fail silently.
 func buildAddrSuffix(ip net.IP, port uint16) ([]byte, error) {
+	if ip == nil {
+		return nil, oops.Errorf("IP address must not be nil for signature construction")
+	}
 	ipBytes, asz, err := normalizeIP(ip)
 	if err != nil {
 		return nil, err
@@ -80,7 +85,19 @@ func verifyData(publicKey ed25519.PublicKey, data, signature []byte) bool {
 
 // isLocalAddress reports whether ip is assigned to a local network interface.
 // Used by DetermineNATType to distinguish NATNone from NATCone.
+//
+// L-7 fix: check pure-computation predicates first (loopback, private, link-local)
+// to avoid the net.Interfaces() syscall in the common case. Only fall back to
+// interface enumeration for addresses that pass those checks (uncommon in NAT context).
 func isLocalAddress(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	// Fast path: pure computation, no syscalls.
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+		return true
+	}
+	// Slow path: check whether the IP is assigned to a local interface.
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return false

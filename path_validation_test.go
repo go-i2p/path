@@ -387,10 +387,10 @@ func TestPathValidator_FailPath(t *testing.T) {
 	// Fail the path
 	pv.FailPath(challengeID, assert.AnError)
 
-	// Verify state changed to failed
-	challenge, exists := pv.GetChallenge(challengeID)
-	require.True(t, exists)
-	assert.Equal(t, ChallengeFailed, challenge.State)
+	// M-2 fix: FailPath now deletes the entry to prevent memory leaks.
+	// The challenge should no longer exist after being failed.
+	_, exists := pv.GetChallenge(challengeID)
+	require.False(t, exists)
 }
 
 // TestPathValidator_FailPath_NonExistent tests failing non-existent challenge.
@@ -484,8 +484,10 @@ func TestPathValidator_CleanupExpired(t *testing.T) {
 	}
 
 	// Run cleanup
+	// M-1/M-2 fix: CleanupExpired now also removes terminal-state entries as a safety
+	// net. All 3 non-recent entries (expired + validated + failed) are removed.
 	cleaned := pv.CleanupExpired()
-	assert.Equal(t, 1, cleaned)
+	assert.Equal(t, 3, cleaned)
 
 	// Verify expired challenge was removed
 	_, exists := pv.GetChallenge(expiredID)
@@ -495,11 +497,11 @@ func TestPathValidator_CleanupExpired(t *testing.T) {
 	_, exists = pv.GetChallenge(recentID)
 	assert.True(t, exists)
 
-	// Verify terminal state challenges still exist
+	// Terminal-state challenges are also removed by CleanupExpired (M-1/M-2 safety net).
 	_, exists = pv.GetChallenge(validatedID)
-	assert.True(t, exists)
+	assert.False(t, exists)
 	_, exists = pv.GetChallenge(failedID)
-	assert.True(t, exists)
+	assert.False(t, exists)
 }
 
 // TestPathValidator_CleanupExpired_Empty tests cleanup with no challenges.
@@ -689,4 +691,84 @@ func TestGenerateChallengeID(t *testing.T) {
 		assert.False(t, ids[id], "duplicate challenge ID generated")
 		ids[id] = true
 	}
+}
+
+// TestRunPMTUD_H1Fix validates H-1: RunPMTUD must return a value > MinMTU when
+// a probe is answered successfully.  The done channel is now copied by GetChallenge
+// so waitForProbeResult can observe the completion signal.
+func TestRunPMTUD_H1Fix(t *testing.T) {
+	ctx := t.Context()
+
+	conn := &mockPathValidationConn{}
+	pv := NewPathValidator(conn)
+	defer pv.Stop()
+
+	addr := &net.UDPAddr{IP: net.ParseIP("198.51.100.1"), Port: 9000}
+
+	// Intercept probes and answer them in a background goroutine.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			conn.mutex.Lock()
+			blocks := make([]*SSU2Block, len(conn.sentBlocks))
+			addrs := make([]*net.UDPAddr, len(conn.sentAddrs))
+			copy(blocks, conn.sentBlocks)
+			copy(addrs, conn.sentAddrs)
+			conn.sentBlocks = nil
+			conn.sentAddrs = nil
+			conn.mutex.Unlock()
+
+			for i, b := range blocks {
+				if b.Type == BlockTypePathChallenge {
+					resp := EncodePathResponse(func() uint64 {
+						id, _ := DecodePathChallenge(b)
+						return id
+					}())
+					_ = pv.HandlePathResponse(resp, addrs[i])
+				}
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	mtu := pv.RunPMTUD(ctx, addr, MinMTU, 1400)
+	// H-1 fix: with done channel properly copied, at least one probe should
+	// succeed, so the result must be greater than MinMTU.
+	assert.Greater(t, mtu, MinMTU, "H-1: RunPMTUD must return > MinMTU when probes succeed")
+}
+
+// TestHandlePathResponse_H2Fix validates H-2: sending two identical Path Response
+// messages for the same challenge must not panic.
+func TestHandlePathResponse_H2Fix(t *testing.T) {
+	conn := &mockPathValidationConn{
+		remoteAddr: &net.UDPAddr{IP: net.ParseIP("198.51.100.1"), Port: 9000},
+	}
+	pv := NewPathValidator(conn)
+	defer pv.Stop()
+
+	addr := &net.UDPAddr{IP: net.ParseIP("198.51.100.1"), Port: 9000}
+	challengeID, err := pv.InitiatePathValidation(addr)
+	require.NoError(t, err)
+
+	responseBlock := EncodePathResponse(challengeID)
+
+	const goroutines = 10
+	errs := make(chan error, goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			errs <- pv.HandlePathResponse(responseBlock, addr)
+		}()
+	}
+
+	// Must complete without panic.
+	wg.Wait()
+	close(errs)
 }

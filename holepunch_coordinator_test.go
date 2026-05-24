@@ -27,7 +27,9 @@ func createTestHolePunchCoordinator(t *testing.T) *HolePunchCoordinator {
 	}
 
 	// Create coordinator with mandatory verifier
-	return NewHolePunchCoordinator(manager, verifyFn)
+	hpc, err := NewHolePunchCoordinator(manager, verifyFn)
+	require.NoError(t, err)
+	return hpc
 }
 
 func TestNewHolePunchCoordinator(t *testing.T) {
@@ -37,7 +39,8 @@ func TestNewHolePunchCoordinator(t *testing.T) {
 		return nil
 	}
 
-	hpc := NewHolePunchCoordinator(manager, verifyFn)
+	hpc, err := NewHolePunchCoordinator(manager, verifyFn)
+	require.NoError(t, err)
 
 	assert.NotNil(t, hpc)
 	assert.Equal(t, manager, hpc.manager)
@@ -45,13 +48,13 @@ func TestNewHolePunchCoordinator(t *testing.T) {
 	assert.Equal(t, 0, len(hpc.attempts))
 }
 
-func TestNewHolePunchCoordinator_NilVerifierPanics(t *testing.T) {
+func TestNewHolePunchCoordinator_NilVerifierReturnsError(t *testing.T) {
 	manager := NewRelayManager(nil)
 
-	// BUG-M02 fix: Verify that nil verifier panics at construction
-	assert.Panics(t, func() {
-		NewHolePunchCoordinator(manager, nil)
-	}, "Expected panic when verifier is nil")
+	// L-3 fix: Verify that nil verifier returns an error instead of panicking
+	hpc, err := NewHolePunchCoordinator(manager, nil)
+	assert.Error(t, err, "Expected error when verifier is nil")
+	assert.Nil(t, hpc)
 }
 
 func TestHolePunchCoordinator_InitiateHolePunch(t *testing.T) {
@@ -740,7 +743,8 @@ func TestHolePunchCoordinator_HandleHolePunch_SignatureVerificationFails(t *test
 			Code("BAD_SIGNATURE").
 			Errorf("invalid signature")
 	}
-	hpc := NewHolePunchCoordinator(manager, verifyFn)
+	hpc, err := NewHolePunchCoordinator(manager, verifyFn)
+	require.NoError(t, err)
 	defer hpc.Stop()
 
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8887}

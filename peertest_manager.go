@@ -167,6 +167,9 @@ type PeerTest struct {
 
 	// ExternalAddr is the detected external address
 	ExternalAddr *net.UDPAddr
+
+	// FailureReason stores the error passed to FailTest (M-4 fix).
+	FailureReason error
 }
 
 // NATType represents the type of NAT detected.
@@ -526,6 +529,7 @@ func (ptm *PeerTestManager) FailTest(nonce uint32, reason error) error {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "FailTest", "nonce": nonce, "reason": reason}).Debug("Failing peer test")
 	return ptm.withTest(nonce, func(test *PeerTest) {
 		test.State = TestFailed
+		test.FailureReason = reason // M-4 fix: persist reason for later inspection
 	})
 }
 
@@ -596,20 +600,17 @@ func (ptm *PeerTestManager) CleanupExpired() {
 	}
 
 	// Clean orphaned results older than 5 minutes.
-	// This handles cases where results exist without corresponding tests:
-	// 1. CompleteTest() followed by RemoveTest()
-	// 2. Tests that timeout before AliceAddr is set
+	// L-2 fix: build an O(T) address set first, then check membership in O(1)
+	// instead of the original O(R×T) inner loop.
+	activeAddrs := make(map[string]struct{}, len(ptm.tests))
+	for _, test := range ptm.tests {
+		if test.AliceAddr != nil {
+			activeAddrs[test.AliceAddr.String()] = struct{}{}
+		}
+	}
 	for addr, result := range ptm.results {
 		if now.Sub(result.TestTime) > 5*time.Minute {
-			// Verify no corresponding test exists
-			hasTest := false
-			for _, test := range ptm.tests {
-				if test.AliceAddr != nil && test.AliceAddr.String() == addr {
-					hasTest = true
-					break
-				}
-			}
-			if !hasTest {
+			if _, hasTest := activeAddrs[addr]; !hasTest {
 				delete(ptm.results, addr)
 			}
 		}
@@ -845,13 +846,9 @@ func (ptm *PeerTestManager) DetermineNATType(result *TestResult) NATType {
 		return NATUnknown
 	}
 
-	// BUG-011 fix: Direct succeeded but relay failed
-	// This may indicate an introducer/relay problem rather than NAT characteristics.
-	// Return NATUnknown to trigger re-probing rather than assuming NATCone.
-	if result.DirectProbeSuccess && !result.RelayedProbeSuccess {
-		return NATUnknown
-	}
-
+	// L-1 fix: only remaining case is DirectProbeSuccess && !RelayedProbeSuccess.
+	// A relay failure alone does not characterise the NAT; return NATUnknown to
+	// trigger re-probing rather than assuming NATCone.
 	return NATUnknown
 }
 
@@ -893,7 +890,12 @@ func (ptm *PeerTestManager) GetListener() ListenerRef {
 	return ptm.listener
 }
 
-// GetTestsMap returns the raw tests map under lock (for testing).
+// GetTestsMap returns a shallow copy of the tests map under lock (for testing only).
+//
+// WARNING (M-3): The returned map values are pointers into the manager's internal
+// state. Callers MUST NOT modify the returned *PeerTest values concurrently with
+// any other manager operation. This method is intended for read-only inspection in
+// tests. For production use, prefer GetTest(nonce).
 func (ptm *PeerTestManager) GetTestsMap() map[uint32]*PeerTest {
 	ptm.mutex.RLock()
 	defer ptm.mutex.RUnlock()
@@ -904,7 +906,12 @@ func (ptm *PeerTestManager) GetTestsMap() map[uint32]*PeerTest {
 	return result
 }
 
-// GetResultsMap returns the raw results map under lock (for testing).
+// GetResultsMap returns a shallow copy of the results map under lock (for testing only).
+//
+// WARNING (M-3): The returned map values are pointers into the manager's internal
+// state. Callers MUST NOT modify the returned *TestResult values concurrently with
+// any other manager operation. This method is intended for read-only inspection in
+// tests. For production use, prefer GetResult(addr).
 func (ptm *PeerTestManager) GetResultsMap() map[string]*TestResult {
 	ptm.mutex.RLock()
 	defer ptm.mutex.RUnlock()

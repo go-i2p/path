@@ -328,6 +328,10 @@ func (pv *PathValidator) HandlePathChallenge(block *SSU2Block, fromAddr *net.UDP
 	}
 
 	pv.mutex.Lock()
+	// L-4 fix: close old done channel before overwriting to unblock any waiter.
+	if old, exists := pv.challenges[challengeID]; exists && old.done != nil {
+		close(old.done)
+	}
 	pv.challenges[challengeID] = challenge
 	pv.mutex.Unlock()
 
@@ -386,6 +390,13 @@ func (pv *PathValidator) HandlePathResponse(block *SSU2Block, fromAddr *net.UDPA
 		return oops.Errorf("no matching challenge for ID %d", challengeID)
 	}
 
+	// H-2 fix: guard against duplicate responses — second response for an already-validated
+	// challenge would close an already-closed channel, causing a panic.
+	if challenge.State == ChallengeValidated {
+		pv.mutex.Unlock()
+		return nil
+	}
+
 	// Verify response came from expected address
 	if challenge.NewAddr.String() != fromAddr.String() {
 		pv.mutex.Unlock()
@@ -410,6 +421,10 @@ func (pv *PathValidator) HandlePathResponse(block *SSU2Block, fromAddr *net.UDPA
 
 	// Complete path validation (skip for MTU-only probes)
 	if challenge.ProbeSize > 0 {
+		// M-1 fix: delete the MTU probe challenge so it does not accumulate indefinitely.
+		pv.mutex.Lock()
+		delete(pv.challenges, challengeID)
+		pv.mutex.Unlock()
 		return nil
 	}
 	return pv.ValidatePath(challengeID)
@@ -483,11 +498,17 @@ func (pv *PathValidator) FailPath(challengeID uint64, reason error) {
 	defer pv.mutex.Unlock()
 
 	if challenge, exists := pv.challenges[challengeID]; exists {
+		// H-2/M-2 fix: guard against double-fail and delete to prevent memory leak.
+		if challenge.State == ChallengeFailed || challenge.State == ChallengeValidated {
+			return
+		}
 		challenge.State = ChallengeFailed
 		// BUG-014 fix: Signal completion
 		if challenge.done != nil {
 			close(challenge.done)
 		}
+		// M-2 fix: delete terminal entry so it does not accumulate indefinitely.
+		delete(pv.challenges, challengeID)
 	}
 }
 
@@ -508,12 +529,13 @@ func (pv *PathValidator) GetChallenge(challengeID uint64) (*PathChallenge, bool)
 		return nil, false
 	}
 
-	// Return defensive copy
+	// Return defensive copy — include done so waitForProbeResult can select on it (H-1 fix).
 	pc := &PathChallenge{
 		ChallengeID: challenge.ChallengeID,
 		Timestamp:   challenge.Timestamp,
 		State:       challenge.State,
 		ProbeSize:   challenge.ProbeSize,
+		done:        challenge.done,
 	}
 	if challenge.NewAddr != nil {
 		addrCopy := *challenge.NewAddr
@@ -537,8 +559,11 @@ func (pv *PathValidator) CleanupExpired() int {
 	cleaned := 0
 
 	for id, challenge := range pv.challenges {
-		// Skip terminal states
+		// Delete terminal-state entries that were not cleaned up at transition time
+		// (e.g., due to a code path that predates the M-1/M-2 fixes).
 		if challenge.State == ChallengeValidated || challenge.State == ChallengeFailed {
+			delete(pv.challenges, id)
+			cleaned++
 			continue
 		}
 
@@ -651,8 +676,9 @@ func EncodePathChallengeWithPadding(challengeID uint64, probeSize int) *SSU2Bloc
 	data := make([]byte, probeSize)
 	binary.BigEndian.PutUint64(data[:8], challengeID)
 	// Fill remaining bytes with random padding; failure is non-fatal.
-	// On Linux/macOS, rand.Read never fails; on other systems, zero padding
-	// is still a valid MTU probe so we intentionally suppress the error.
+	// On Linux/macOS, rand.Read never fails (reads from getrandom(2) or /dev/urandom);
+	// on other systems, zero padding is still a valid MTU probe payload,
+	// so the error is intentionally ignored. (L-8 fix: explicit comment added.)
 	if probeSize > 8 {
 		_, _ = rand.Read(data[8:])
 	}
@@ -718,6 +744,8 @@ func (pv *PathValidator) CompleteMTUProbe(challengeID uint64) {
 	if challenge.done != nil {
 		close(challenge.done)
 	}
+	// M-1 fix: delete terminal MTU probe entry to prevent memory leak.
+	delete(pv.challenges, challengeID)
 }
 
 // GetDiscoveredMTU returns the largest validated MTU from probing, or 0
