@@ -394,3 +394,74 @@ func isLocalAddress(ip net.IP) bool {
 	}
 	return false
 }
+
+// DetermineNATType analyzes test results to determine NAT type.
+//
+// Logic per I2P specification:
+//   - Both probes succeed + consistent port/IP = No NAT or Full Cone
+//   - Direct fails + relayed succeeds = Symmetric or Port-Restricted
+//   - Port inconsistent = Symmetric NAT
+//   - IP inconsistent = Multiple NATs or proxy
+//
+// Parameters:
+//   - result: Test result with probe outcomes
+//
+// Returns determined NAT type.
+func DetermineNATType(result *TestResult) NATType {
+	if result == nil {
+		return NATUnknown
+	}
+
+	// Both probes succeeded
+	if result.DirectProbeSuccess && result.RelayedProbeSuccess {
+		return determineNATFromBothProbes(result)
+	}
+
+	// Only relayed probe succeeded
+	if !result.DirectProbeSuccess && result.RelayedProbeSuccess {
+		return determineNATFromRelayedOnly(result)
+	}
+
+	// Neither probe succeeded
+	if !result.DirectProbeSuccess && !result.RelayedProbeSuccess {
+		return NATUnknown
+	}
+
+	// Only remaining case: DirectProbeSuccess && !RelayedProbeSuccess.
+	// A relay failure alone does not characterise the NAT; return NATUnknown to
+	// trigger re-probing rather than assuming NATCone.
+	return NATUnknown
+}
+
+// determineNATFromBothProbes determines NAT type when both direct and relayed probes succeeded.
+// This helper reduces cyclomatic complexity in DetermineNATType.
+func determineNATFromBothProbes(result *TestResult) NATType {
+	if result.PortConsistent && result.IPConsistent {
+		// Check whether the observed external address matches a local interface.
+		// If it does, the peer has a public IP with no NAT; otherwise full cone NAT.
+		if result.ExternalAddr != nil && isLocalAddress(result.ExternalAddr.IP) {
+			return NATNone
+		}
+		return NATCone
+	}
+	if !result.PortConsistent {
+		// Port changes = symmetric or port-restricted
+		return NATPortRestricted
+	}
+	if !result.IPConsistent {
+		// IP changes = multiple NATs or proxies
+		return NATRestricted
+	}
+	return NATUnknown
+}
+
+// determineNATFromRelayedOnly determines NAT type when only relayed probe succeeded.
+// This helper reduces cyclomatic complexity in DetermineNATType.
+func determineNATFromRelayedOnly(result *TestResult) NATType {
+	if result.PortConsistent {
+		// Port stays same but direct fails = restricted cone
+		return NATRestricted
+	}
+	// Port changes = symmetric NAT
+	return NATSymmetric
+}
