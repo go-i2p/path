@@ -354,3 +354,43 @@ func DescribeNATCapabilities(natType NATType) string {
 		return "Unrecognized NAT type"
 	}
 }
+
+// isLocalAddress reports whether ip is assigned to a local network interface.
+// Used by DetermineNATType to distinguish NATNone from NATCone.
+//
+// L-7 fix: check pure-computation predicates first (loopback, private, link-local)
+// to avoid the net.Interfaces() syscall in the common case. Only fall back to
+// interface enumeration for addresses that pass those checks (uncommon in NAT context).
+func isLocalAddress(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	// Fast path: pure computation, no syscalls.
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+		return true
+	}
+	// Slow path: check whether the IP is assigned to a local interface.
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var localIP net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				localIP = v.IP
+			case *net.IPAddr:
+				localIP = v.IP
+			}
+			if localIP != nil && localIP.Equal(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}

@@ -24,6 +24,18 @@ import (
 	"github.com/samber/oops"
 )
 
+// TokenCacheAccessor provides address-based token invalidation.
+// Implemented by *ssu2.TokenCache.
+type TokenCacheAccessor interface {
+	InvalidateAddress(addr *net.UDPAddr)
+}
+
+// CongestionControllerAccessor provides congestion reset.
+// Implemented by *ssu2/reliability.CongestionController.
+type CongestionControllerAccessor interface {
+	Reset()
+}
+
 // PathValidator implements connection migration with path validation.
 //
 // Path validation allows an SSU2 connection to migrate to a new UDP path
