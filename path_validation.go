@@ -463,19 +463,24 @@ func (pv *PathValidator) ValidatePath(challengeID uint64) error {
 	congestionController := pv.congestionController
 	pv.mutex.Unlock()
 
-	// Invalidate tokens bound to the old address before migration
+	// BUG-002 fix: capture old address before migration so we can invalidate
+	// tokens only after SetRemoteAddr succeeds. Invalidating first would leave
+	// the connection in a broken state if SetRemoteAddr fails.
+	var oldAddr *net.UDPAddr
 	if tokenCache != nil {
-		oldAddr := pv.conn.GetRemoteAddr()
-		if oldAddr != nil {
-			tokenCache.InvalidateAddress(oldAddr)
-		}
+		oldAddr = pv.conn.GetRemoteAddr()
 	}
 
-	// Update connection remote address
+	// Update connection remote address first; only proceed with side effects on success.
 	if err := pv.conn.SetRemoteAddr(newAddr); err != nil {
-		// Note: Challenge already deleted above to prevent TOCTOU race
-		// Cannot call FailPath since challenge no longer exists
+		// Note: Challenge already deleted above to prevent TOCTOU race.
+		// Cannot call FailPath since challenge no longer exists.
 		return oops.Wrapf(err, "failed to set remote address")
+	}
+
+	// Invalidate tokens bound to the old address now that migration succeeded.
+	if tokenCache != nil && oldAddr != nil {
+		tokenCache.InvalidateAddress(oldAddr)
 	}
 
 	// G-7: Reset congestion controller after successful path migration
@@ -593,8 +598,11 @@ func generateChallengeID() (uint64, error) {
 		}
 		// Extremely unlikely: got zero, retry
 	}
-	// If we still got zero after maxAttempts, just use 1 as fallback
-	return 1, nil
+	// BUG-007 fix: returning the literal 1 is as bad as returning 0 — it's a
+	// predictable, non-random value that could be exploited to collide challenge
+	// IDs. After exhausting retries (probability (1/2^64)^3 ≈ 0), treat it as a
+	// CSPRNG failure and surface the error to the caller.
+	return 0, oops.Errorf("failed to generate non-zero challenge ID after %d attempts", maxAttempts)
 }
 
 // EncodePathChallenge encodes a Path Challenge block (Type 18).
@@ -784,8 +792,11 @@ func (pv *PathValidator) waitForProbeResult(ctx context.Context, id uint64) bool
 		// discoveredMTU reached the probe size — it is only updated on success. (H-1 fix)
 		return pv.GetDiscoveredMTU() >= ch.ProbeSize
 	case <-timer.C:
-		// Timeout - probe failed
-		return false
+		// BUG-003 fix: check discoveredMTU before returning false.
+		// When done and timer fire simultaneously, Go selects randomly between them.
+		// If timer wins but the response was already processed, discoveredMTU will
+		// reflect the successful probe — return the correct result rather than false.
+		return pv.GetDiscoveredMTU() >= ch.ProbeSize
 	}
 }
 

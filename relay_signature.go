@@ -97,6 +97,10 @@ func VerifyRelayRequestSignature(
 	if !verifyData(publicKey, data, signature) {
 		return false, nil
 	}
+	// BUG-004 fix: zero timestamp means the field was never set, not a skew violation.
+	if timestamp == 0 {
+		return false, oops.Errorf("relay request timestamp not set (zero)")
+	}
 	// L-5: Reject replayed or severely clock-skewed blocks.
 	age := time.Since(time.Unix(int64(timestamp), 0))
 	if age > MaxClockSkew || age < -MaxClockSkew {
@@ -180,6 +184,10 @@ func VerifyRelayResponseSignature(
 	}
 	if !verifyData(publicKey, data, signature) {
 		return false, nil
+	}
+	// BUG-004 fix: zero timestamp means the field was never set, not a skew violation.
+	if timestamp == 0 {
+		return false, oops.Errorf("relay response timestamp not set (zero)")
 	}
 	// L-5: Reject replayed or severely clock-skewed blocks.
 	age := time.Since(time.Unix(int64(timestamp), 0))

@@ -532,6 +532,10 @@ func (rm *RelayManager) AddPendingSession(sessionID uint64, remoteAddr, introduc
 func (rm *RelayManager) GetPendingSession(sessionID uint64) *PendingSession {
 	rm.mutex.RLock()
 	defer rm.mutex.RUnlock()
+	// BUG-005 fix: guard against accessing state after Stop().
+	if rm.stopped {
+		return nil
+	}
 
 	session, exists := rm.pendingSessions[sessionID]
 	if !exists {

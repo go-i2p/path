@@ -40,6 +40,11 @@ type PeerTestManager struct {
 	// results maps remote address to test result
 	results map[string]*TestResult
 
+	// pendingResults stores results for initiator tests whose AliceAddr is not
+	// yet known at CompleteTest time. Keyed by nonce; re-keyed to results by
+	// address when SetAliceAddr is called (BUG-001 fix).
+	pendingResults map[uint32]*TestResult
+
 	// mutex protects all fields
 	mutex sync.RWMutex
 
@@ -254,10 +259,11 @@ type TestResult struct {
 func NewPeerTestManager(listener ListenerRef) *PeerTestManager {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "NewPeerTestManager"}).Debug("Creating new PeerTestManager")
 	ptm := &PeerTestManager{
-		listener: listener,
-		tests:    make(map[uint32]*PeerTest),
-		results:  make(map[string]*TestResult),
-		stopCh:   make(chan struct{}),
+		listener:       listener,
+		tests:          make(map[uint32]*PeerTest),
+		results:        make(map[string]*TestResult),
+		pendingResults: make(map[uint32]*TestResult),
+		stopCh:         make(chan struct{}),
 	}
 	go ptm.cleanupLoop()
 	return ptm
@@ -510,9 +516,12 @@ func (ptm *PeerTestManager) CompleteTest(nonce uint32, result *TestResult) error
 	test.Reachable = result.Reachable
 	test.ExternalAddr = result.ExternalAddr
 
-	// Store result by address (if available)
+	// Store result by address if available; otherwise hold under nonce until
+	// SetAliceAddr provides the address key (BUG-001 fix).
 	if test.AliceAddr != nil {
 		ptm.results[test.AliceAddr.String()] = result
+	} else {
+		ptm.pendingResults[nonce] = result
 	}
 
 	return nil
@@ -577,6 +586,8 @@ func (ptm *PeerTestManager) RemoveTest(nonce uint32) {
 	defer ptm.mutex.Unlock()
 
 	delete(ptm.tests, nonce)
+	// BUG-001 fix: also remove any pending result for this nonce.
+	delete(ptm.pendingResults, nonce)
 }
 
 // CleanupExpired removes tests that have exceeded their timeout.
@@ -595,6 +606,8 @@ func (ptm *PeerTestManager) CleanupExpired() {
 			if test.AliceAddr != nil {
 				delete(ptm.results, test.AliceAddr.String())
 			}
+			// BUG-001 fix: also remove any pending result keyed by nonce.
+			delete(ptm.pendingResults, nonce)
 			delete(ptm.tests, nonce)
 		}
 	}
@@ -810,6 +823,12 @@ func (ptm *PeerTestManager) SetAliceAddr(nonce uint32, addr *net.UDPAddr) error 
 	}
 	return ptm.withTest(nonce, func(test *PeerTest) {
 		test.AliceAddr = addr
+		// BUG-001 fix: re-key any pending result from nonce to address now that
+		// Alice's address is known.
+		if pending, ok := ptm.pendingResults[nonce]; ok {
+			ptm.results[addr.String()] = pending
+			delete(ptm.pendingResults, nonce)
+		}
 	})
 }
 
