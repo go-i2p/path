@@ -376,7 +376,6 @@ func (rm *RelayManager) AllocateRelayTag(addr *net.UDPAddr) (uint32, error) {
 		With("max_attempts", maxAttempts).
 		Errorf("relay tag collision after %d attempts (active tags: %d, load factor: %.2f%%)",
 			maxAttempts, len(rm.relayTags), float64(len(rm.relayTags))/float64(1<<32)*100)
-
 }
 
 // ValidateRelayTag validates that a relay tag is active and matches the specified address.
