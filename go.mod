@@ -1,6 +1,6 @@
 module github.com/go-i2p/path
 
-go 1.26.1
+go 1.26.3
 
 //replace github.com/go-i2p/go-noise => ../go-noise
 
@@ -9,7 +9,7 @@ require (
 	github.com/go-i2p/crypto v0.1.55
 	github.com/go-i2p/go-noise v0.1.56-0.20260604132146-6f0b77ae3bfe
 	github.com/go-i2p/logger v0.1.55
-	github.com/samber/oops v1.21.0
+	github.com/samber/oops v1.22.0
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -21,8 +21,8 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/samber/lo v1.53.0 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
-	go.opentelemetry.io/otel v1.43.0 // indirect
-	go.opentelemetry.io/otel/trace v1.43.0 // indirect
+	go.opentelemetry.io/otel v1.44.0 // indirect
+	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
