@@ -205,11 +205,12 @@ func (ptm *PeerTestManager) Stop() {
 }
 
 // cleanupLoop periodically removes expired peer tests.
-// BUG-L04: 60-second interval matches I2P SSU2 spec §Peer Test timeout.
-// Peer tests use 7 messages and involve 3 parties (Alice, Bob, Charlie),
-// so longer timeout than hole punch (30s) or path validation (10s).
+// FIX-4.3: Reduced interval from 60s to 30s to decrease max latency from ~119s to ~89s.
+// Peer tests expire at 60s per I2P spec, so cleanup every 30s ensures max age ≈ 60 + 30 = 90s.
+// This balances latency (reachability re-evaluation) against CPU cost.
+// Previous interval (60s) meant tests created just after a cleanup tick could live ~119s.
 func (ptm *PeerTestManager) cleanupLoop() {
-	ticker := time.NewTicker(60 * time.Second)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -519,6 +520,9 @@ func (ptm *PeerTestManager) RemoveTest(nonce uint32) {
 }
 
 // CleanupExpired removes tests that have exceeded their timeout.
+// FIX-3.3: Use Deadline field consistently instead of recomputing from StartTime.
+// Deadline is the authoritative deadline; computing from StartTime can diverge if
+// StartTime is adjusted (via SetTestStartTime), leading to inconsistent behavior.
 func (ptm *PeerTestManager) CleanupExpired() {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "CleanupExpired"}).Debug("Removing expired peer tests")
 	now := time.Now()
@@ -528,8 +532,8 @@ func (ptm *PeerTestManager) CleanupExpired() {
 
 	// Clean expired tests
 	for nonce, test := range ptm.tests {
-		// Check if test has timed out (60 seconds per I2P spec)
-		if now.Sub(test.StartTime) > 60*time.Second {
+		// Check if test has timed out using Deadline field (not derived from StartTime)
+		if now.After(test.Deadline) {
 			// Also remove the corresponding result entry keyed by AliceAddr.
 			if test.AliceAddr != nil {
 				delete(ptm.results, test.AliceAddr.String())
@@ -646,6 +650,17 @@ func (ptm *PeerTestManager) CreateRelayTest(nonce uint32, aliceAddr, charlieAddr
 	ptm.mutex.Lock()
 	defer ptm.mutex.Unlock()
 
+	// FIX-3.1: Check for nonce collision before storing.
+	// External nonces (from Alice) can collide with existing tests.
+	// Reject if nonce already in use to prevent state machine violation.
+	if _, exists := ptm.tests[nonce]; exists {
+		return 0, oops.
+			Code("NONCE_COLLISION").
+			In("peertest_manager").
+			With("nonce", nonce).
+			Errorf("peer test with nonce already exists (collision or replay)")
+	}
+
 	// Create relay test
 	test := &PeerTest{
 		Nonce:       nonce,
@@ -709,6 +724,17 @@ func (ptm *PeerTestManager) CreateResponderTest(nonce uint32, aliceAddr, bobAddr
 
 	ptm.mutex.Lock()
 	defer ptm.mutex.Unlock()
+
+	// FIX-3.1: Check for nonce collision before storing.
+	// External nonces (from Bob) can collide with existing tests.
+	// Reject if nonce already in use to prevent state machine violation.
+	if _, exists := ptm.tests[nonce]; exists {
+		return oops.
+			Code("NONCE_COLLISION").
+			In("peertest_manager").
+			With("nonce", nonce).
+			Errorf("peer test with nonce already exists (collision or replay)")
+	}
 
 	// Create responder test
 	test := &PeerTest{

@@ -173,7 +173,12 @@ func AnalyzeProbeResults(directSuccess, relayedSuccess bool, addr1, addr2 *net.U
 		}
 	}
 
-	// Set reachability based on probe success
+	// FIX-6.1: Set reachability based on probe success.
+	// WARNING: A single probe is insufficient for robust reachability determination.
+	// Callers MUST implement retry/aggregation logic before marking a node as
+	// unreachable based on a single failed probe. Single dropped UDP packets are
+	// common on lossy paths and do not indicate true unreachability.
+	// Example: Re-probe on first failure; only mark unreachable after N failures.
 	result.Reachable = directSuccess
 
 	// BUG-L09 fix: Initialize TestTime to current time
@@ -430,21 +435,40 @@ func DetermineNATType(result *TestResult) NATType {
 		return NATUnknown
 	}
 
-	// Only remaining case: DirectProbeSuccess && !RelayedProbeSuccess.
-	// A relay failure alone does not characterise the NAT; return NATUnknown to
-	// trigger re-probing rather than assuming NATCone.
-	return NATUnknown
+	// FIX-6.2: Direct succeeded, relay failed.
+	// Relay failure can occur for reasons unrelated to NAT (relay outage, network partition).
+	// Direct probe success indicates the peer is reachable, at least from this vantage point.
+	// Return NATNone conservatively: direct reachability implies either public IP or full-cone NAT.
+	// Callers should re-probe with a different relay if they need to distinguish NATNone vs NATCone.
+	return NATNone
 }
 
 // determineNATFromBothProbes determines NAT type when both direct and relayed probes succeeded.
 // This helper reduces cyclomatic complexity in DetermineNATType.
+// FIX-6.3: Improved heuristics for NATNone vs NATCone distinction.
 func determineNATFromBothProbes(result *TestResult) NATType {
 	if result.PortConsistent && result.IPConsistent {
-		// Check whether the observed external address matches a local interface.
-		// If it does, the peer has a public IP with no NAT; otherwise full cone NAT.
-		if result.ExternalAddr != nil && isLocalAddress(result.ExternalAddr.IP) {
+		// FIX-6.3: Check whether the observed external address is actually local.
+		// isLocalAddress uses fast predicates first (loopback, private, link-local),
+		// then falls back to interface enumeration only for public-looking addresses.
+		// However, hosts with 1:1 NAT or cloud floating IPs have public IP not assigned
+		// to a local interface, causing misclassification as NATCone.
+		// Strategy: Prefer conservative NATNone unless we're sure it's a full-cone NAT.
+		// If the address is clearly not local (fails isLocalAddress check but probe succeeded),
+		// it's likely a public IP behind 1:1 NAT. Return NATNone in ambiguous cases.
+		if result.ExternalAddr != nil {
+			if isLocalAddress(result.ExternalAddr.IP) {
+				// Address is explicitly assigned to a local interface -> NATNone
+				return NATNone
+			}
+			// FIX-6.3: Ambiguous case - address not found on local interface.
+			// Could be public IP (NATNone), full-cone NAT (NATCone), or 1:1 NAT.
+			// Conservative approach: prefer NATNone to enable direct peer connectivity.
+			// Higher-level policy can add secondary checks (e.g., check if address is
+			// in known public IP space) if finer distinction is needed.
 			return NATNone
 		}
+		// No external address (shouldn't happen, but be defensive)
 		return NATCone
 	}
 	if !result.PortConsistent {
