@@ -7,7 +7,7 @@ go 1.26.3
 require (
 	github.com/go-i2p/common v0.1.60000-0.20260612012818-ffa84716e922
 	github.com/go-i2p/crypto v0.1.60000-0.20260612012729-bcf561943886
-	github.com/go-i2p/go-noise v0.1.60000-0.20260612010559-ffcf7d55d208
+	github.com/go-i2p/go-noise v0.1.60000-0.20260619175153-891cd6d88658
 	github.com/go-i2p/logger v0.1.60000-0.20260612012503-bec4044a2b0d
 	github.com/samber/oops v1.22.0
 	github.com/stretchr/testify v1.11.1
