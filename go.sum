@@ -4,12 +4,12 @@ github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dchest/siphash v1.2.3 h1:QXwFc8cFOR2dSa/gE6o/HokBMWtLUaNDVd+22aKHeEA=
 github.com/dchest/siphash v1.2.3/go.mod h1:0NvQU092bT0ipiFN++/rXm69QG9tVxLAlQHIXMPAkHc=
-github.com/go-i2p/common v0.1.60000-0.20260612012818-ffa84716e922 h1:jatAOaR3Soxy+IrRc4pbQ7qjyUwIAurM62M3SuIsmIQ=
-github.com/go-i2p/common v0.1.60000-0.20260612012818-ffa84716e922/go.mod h1:Fi8w1almPiorSn0vLd/wqJ5Rf4rvDB0+5yh6M+xANeE=
+github.com/go-i2p/common v0.1.62 h1:84/Akz9pcvcts4KVhyi8N13tAV7ON1t2m8VI3KFIprI=
+github.com/go-i2p/common v0.1.62/go.mod h1:EAqmSgjfY5P/Epo5ldZvX90FaLO/o2zjSz7B2kaEA38=
 github.com/go-i2p/crypto v0.1.60000-0.20260612012729-bcf561943886 h1:6E68Tehym8Z6IhvFx9/LP2Qz5gqwBW2sz0I6gRVAwp8=
 github.com/go-i2p/crypto v0.1.60000-0.20260612012729-bcf561943886/go.mod h1:vG+WmpFqlTzebxLvE1SQ1YO6XubBZisf3b+Vj2Rh/Ww=
-github.com/go-i2p/go-noise v0.1.60000-0.20260625215446-4147bed7d7e6 h1:iKIcbduuNxV3FFz3733F/9+fjfr2IeHHzHetFc5GoH0=
-github.com/go-i2p/go-noise v0.1.60000-0.20260625215446-4147bed7d7e6/go.mod h1:DXDXoPsAvw42RgZUs4hIRQwC16lxZN2vlFnNYt9DfqA=
+github.com/go-i2p/go-noise v0.1.59 h1:aq8umah3K0YFL6JQeUF5+VQJsMYg82qkiojy07gfDE4=
+github.com/go-i2p/go-noise v0.1.59/go.mod h1:ixgm9eXBisJWkyCPryqL4e0Is6gi6o9j+LJr1tDHqTo=
 github.com/go-i2p/logger v0.1.60000-0.20260612012503-bec4044a2b0d h1:AJWfD1WSsIMYAcCnJ+c2IOvCfm5Wf5UW1fGHgKuasr4=
 github.com/go-i2p/logger v0.1.60000-0.20260612012503-bec4044a2b0d/go.mod h1:ygRTQPZmHNNfwEf+vPtJwJs/EjIW7al5OOo+hEY6KS0=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
