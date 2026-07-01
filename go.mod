@@ -7,7 +7,7 @@ go 1.26.3
 require (
 	github.com/go-i2p/common v0.1.60000-0.20260630222658-15751a11a45e
 	github.com/go-i2p/crypto v0.1.60000-0.20260630222545-de94e58f0e78
-	github.com/go-i2p/go-noise v0.1.60000-0.20260630223254-36f03f650eaa
+	github.com/go-i2p/go-noise v0.1.3
 	github.com/go-i2p/logger v0.1.60000-0.20260612012503-bec4044a2b0d
 	github.com/samber/oops v1.22.0
 	github.com/stretchr/testify v1.11.1
@@ -17,6 +17,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dchest/siphash v1.2.3 // indirect
+	github.com/go-i2p/noise v0.1.62 // indirect
 	github.com/oklog/ulid/v2 v2.1.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/samber/lo v1.53.0 // indirect
