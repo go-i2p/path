@@ -7,7 +7,7 @@ go 1.26.3
 require (
 	github.com/go-i2p/common v0.1.60000-0.20260701134558-e5f5cf65a7f5
 	github.com/go-i2p/crypto v0.1.60000-0.20260701135847-3ade996b68a0
-	github.com/go-i2p/go-noise v0.1.60000-0.20260701160106-d128aff73232
+	github.com/go-i2p/go-noise v0.1.60000-0.20260707002459-79020182b0d1
 	github.com/go-i2p/logger v0.1.60000-0.20260701134448-2648c3b0e040
 	github.com/samber/oops v1.22.0
 	github.com/stretchr/testify v1.11.1
@@ -25,6 +25,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
