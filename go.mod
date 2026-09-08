@@ -1,6 +1,6 @@
 module github.com/go-i2p/path
 
-go 1.26.3
+go 1.26.8
 
 //replace github.com/go-i2p/go-noise => ../go-noise
 
