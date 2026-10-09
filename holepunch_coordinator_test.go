@@ -7,27 +7,35 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samber/oops"
+	"github.com/go-i2p/common/data"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// testVerifyContext holds the fixed identities a test resolver returns.
+var (
+	testBobHash     = data.Hash{0x01}
+	testCharlieHash = data.Hash{0x02}
+	testAlicePriv   = ed25519.NewKeyFromSeed(make([]byte, 32))
+	testAlicePub    = testAlicePriv.Public().(ed25519.PublicKey)
+)
+
 // createTestHolePunchCoordinator creates a HolePunchCoordinator for testing.
-// BUG-M02 fix: Now provides a default no-op signature verifier since it's
-// mandatory at construction.
+// The resolver accepts every lookup and returns a fixed test key pair; tests
+// that need rejection behavior construct their own resolver.
 func createTestHolePunchCoordinator(t *testing.T) *HolePunchCoordinator {
 	t.Helper()
 
 	// Create relay manager (nil listener is sufficient for path package tests)
 	manager := NewRelayManager(nil)
 
-	// Provide a default verifier that accepts all signatures (for testing)
-	verifyFn := func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
-		return nil
+	// Provide a default resolver that always succeeds (for testing)
+	resolver := func(info HolePunchVerifyInfo) (HolePunchVerifyContext, ed25519.PublicKey, bool) {
+		return HolePunchVerifyContext{BobHash: testBobHash, CharlieHash: testCharlieHash}, testAlicePub, true
 	}
 
-	// Create coordinator with mandatory verifier
-	hpc, err := NewHolePunchCoordinator(manager, verifyFn)
+	// Create coordinator with mandatory resolver
+	hpc, err := NewHolePunchCoordinator(manager, resolver)
 	require.NoError(t, err)
 	return hpc
 }
@@ -35,11 +43,11 @@ func createTestHolePunchCoordinator(t *testing.T) *HolePunchCoordinator {
 func TestNewHolePunchCoordinator(t *testing.T) {
 	manager := NewRelayManager(nil)
 
-	verifyFn := func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
-		return nil
+	resolver := func(info HolePunchVerifyInfo) (HolePunchVerifyContext, ed25519.PublicKey, bool) {
+		return HolePunchVerifyContext{}, testAlicePub, true
 	}
 
-	hpc, err := NewHolePunchCoordinator(manager, verifyFn)
+	hpc, err := NewHolePunchCoordinator(manager, resolver)
 	require.NoError(t, err)
 
 	assert.NotNil(t, hpc)
@@ -48,12 +56,12 @@ func TestNewHolePunchCoordinator(t *testing.T) {
 	assert.Equal(t, 0, len(hpc.attempts))
 }
 
-func TestNewHolePunchCoordinator_NilVerifierReturnsError(t *testing.T) {
+func TestNewHolePunchCoordinator_NilResolverReturnsError(t *testing.T) {
 	manager := NewRelayManager(nil)
 
-	// L-3 fix: Verify that nil verifier returns an error instead of panicking
+	// L-3 fix: Verify that nil resolver returns an error instead of panicking
 	hpc, err := NewHolePunchCoordinator(manager, nil)
-	assert.Error(t, err, "Expected error when verifier is nil")
+	assert.Error(t, err, "Expected error when resolver is nil")
 	assert.Nil(t, hpc)
 }
 
@@ -200,7 +208,7 @@ func TestHolePunchCoordinator_HandleHolePunch(t *testing.T) {
 	fromAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.3"), Port: 8889}
 
 	// Per BUG-001 fix: nil block must be rejected per SSU2 spec
-	err = hpc.HandleHolePunch(sessionID, fromAddr, nil, nil)
+	err = hpc.HandleHolePunch(sessionID, fromAddr, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "block cannot be nil")
 }
@@ -209,7 +217,7 @@ func TestHolePunchCoordinator_HandleHolePunch_ZeroSessionID(t *testing.T) {
 	hpc := createTestHolePunchCoordinator(t)
 
 	fromAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8887}
-	err := hpc.HandleHolePunch(0, fromAddr, nil, nil)
+	err := hpc.HandleHolePunch(0, fromAddr, nil)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "session ID cannot be zero")
@@ -218,7 +226,7 @@ func TestHolePunchCoordinator_HandleHolePunch_ZeroSessionID(t *testing.T) {
 func TestHolePunchCoordinator_HandleHolePunch_NilAddress(t *testing.T) {
 	hpc := createTestHolePunchCoordinator(t)
 
-	err := hpc.HandleHolePunch(12345, nil, nil, nil)
+	err := hpc.HandleHolePunch(12345, nil, nil)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "from address cannot be nil")
@@ -228,7 +236,7 @@ func TestHolePunchCoordinator_HandleHolePunch_SessionNotFound(t *testing.T) {
 	hpc := createTestHolePunchCoordinator(t)
 
 	fromAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8887}
-	err := hpc.HandleHolePunch(99999, fromAddr, nil, nil)
+	err := hpc.HandleHolePunch(99999, fromAddr, nil)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hole punch session not found")
@@ -245,7 +253,7 @@ func TestHolePunchCoordinator_ProcessHolePunchResponse(t *testing.T) {
 	require.NoError(t, err)
 
 	// Per BUG-001 fix: nil block must be rejected per SSU2 spec
-	err = hpc.ProcessHolePunchResponse(sessionID, remoteAddr, nil, nil)
+	err = hpc.ProcessHolePunchResponse(sessionID, remoteAddr, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "block cannot be nil")
 }
@@ -254,7 +262,7 @@ func TestHolePunchCoordinator_ProcessHolePunchResponse_ZeroSessionID(t *testing.
 	hpc := createTestHolePunchCoordinator(t)
 
 	addr := &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8887}
-	err := hpc.ProcessHolePunchResponse(0, addr, nil, nil)
+	err := hpc.ProcessHolePunchResponse(0, addr, nil)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "session ID cannot be zero")
@@ -263,7 +271,7 @@ func TestHolePunchCoordinator_ProcessHolePunchResponse_ZeroSessionID(t *testing.
 func TestHolePunchCoordinator_ProcessHolePunchResponse_NilAddress(t *testing.T) {
 	hpc := createTestHolePunchCoordinator(t)
 
-	err := hpc.ProcessHolePunchResponse(12345, nil, nil, nil)
+	err := hpc.ProcessHolePunchResponse(12345, nil, nil)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "address cannot be nil")
@@ -273,7 +281,7 @@ func TestHolePunchCoordinator_ProcessHolePunchResponse_SessionNotFound(t *testin
 	hpc := createTestHolePunchCoordinator(t)
 
 	addr := &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8887}
-	err := hpc.ProcessHolePunchResponse(99999, addr, nil, nil)
+	err := hpc.ProcessHolePunchResponse(99999, addr, nil)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hole punch session not found")
@@ -292,7 +300,7 @@ func TestHolePunchCoordinator_ProcessHolePunchResponse_AddressMismatch(t *testin
 	// Different address
 	wrongAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.99"), Port: 9999}
 	// Per BUG-001 fix: nil block is rejected before address check
-	err = hpc.ProcessHolePunchResponse(sessionID, wrongAddr, nil, nil)
+	err = hpc.ProcessHolePunchResponse(sessionID, wrongAddr, nil)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "block cannot be nil")
@@ -608,7 +616,7 @@ func TestHolePunchCoordinator_GetStats(t *testing.T) {
 	sessionID3, err := hpc.InitiateHolePunch(remoteAddr, introducerAddr, uint32(0x12345673))
 	require.NoError(t, err)
 	// Per BUG-001 fix: nil block must be rejected
-	err = hpc.HandleHolePunch(sessionID3, remoteAddr, nil, nil)
+	err = hpc.HandleHolePunch(sessionID3, remoteAddr, nil)
 	require.Error(t, err)
 	// sessionID3 remains in requested state due to rejected nil block
 
@@ -711,7 +719,6 @@ func TestHolePunchCoordinator_ConcurrentOperations(t *testing.T) {
 
 func TestHolePunchCoordinator_HandleHolePunch_WithSignatureVerification(t *testing.T) {
 	hpc := createTestHolePunchCoordinator(t)
-	// BUG-M02 fix: Verifier is now set at construction via createTestHolePunchCoordinator
 
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8887}
 	introducerAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.2"), Port: 8888}
@@ -720,13 +727,27 @@ func TestHolePunchCoordinator_HandleHolePunch_WithSignatureVerification(t *testi
 	sessionID, err := hpc.InitiateHolePunch(remoteAddr, introducerAddr, relayTag)
 	require.NoError(t, err)
 
+	// Build a properly signed RelayIntro block matching the resolver's context.
+	nonce := uint32(0x11223344)
+	timestamp := uint32(time.Now().Unix())
+	aliceIP := net.ParseIP("203.0.113.4")
+	alicePort := uint16(9999)
+	sig, err := SignRelayRequest(testAlicePriv, testBobHash, testCharlieHash,
+		nonce, relayTag, timestamp, 2, alicePort, aliceIP) // 2 = SSU2 version byte
+	require.NoError(t, err)
+
 	block := &RelayIntroBlock{
 		AliceRouterHash: make([]byte, 32),
-		Nonce:           relayTag,
-		Signature:       make([]byte, 64),
+		Nonce:           nonce,
+		AliceRelayTag:   relayTag,
+		Timestamp:       timestamp,
+		Version:         2, // SSU2 version byte
+		AlicePort:       alicePort,
+		AliceIP:         aliceIP,
+		Signature:       sig,
 	}
 	fromAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.3"), Port: 8889}
-	err = hpc.HandleHolePunch(sessionID, fromAddr, block, nil)
+	err = hpc.HandleHolePunch(sessionID, fromAddr, block)
 	require.NoError(t, err)
 
 	attempt := hpc.GetAttempt(sessionID)
@@ -737,13 +758,11 @@ func TestHolePunchCoordinator_HandleHolePunch_WithSignatureVerification(t *testi
 func TestHolePunchCoordinator_HandleHolePunch_SignatureVerificationFails(t *testing.T) {
 	manager := NewRelayManager(nil)
 
-	// BUG-M02 fix: Create coordinator with a verifier that rejects all signatures
-	verifyFn := func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
-		return oops.
-			Code("BAD_SIGNATURE").
-			Errorf("invalid signature")
+	// Resolver that fails closed (simulates unknown peer / missing key)
+	resolver := func(info HolePunchVerifyInfo) (HolePunchVerifyContext, ed25519.PublicKey, bool) {
+		return HolePunchVerifyContext{}, nil, false
 	}
-	hpc, err := NewHolePunchCoordinator(manager, verifyFn)
+	hpc, err := NewHolePunchCoordinator(manager, resolver)
 	require.NoError(t, err)
 	defer hpc.Stop()
 
@@ -760,9 +779,36 @@ func TestHolePunchCoordinator_HandleHolePunch_SignatureVerificationFails(t *test
 		Signature:       make([]byte, 64),
 	}
 	fromAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.3"), Port: 8889}
-	err = hpc.HandleHolePunch(sessionID, fromAddr, block, nil)
+	err = hpc.HandleHolePunch(sessionID, fromAddr, block)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "signature verification failed")
+	assert.Contains(t, err.Error(), "fail-closed")
+}
+
+func TestHolePunchCoordinator_HandleHolePunch_BadSignatureRejected(t *testing.T) {
+	hpc := createTestHolePunchCoordinator(t)
+
+	remoteAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8887}
+	introducerAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.2"), Port: 8888}
+	relayTag := uint32(0xABCD1234)
+
+	sessionID, err := hpc.InitiateHolePunch(remoteAddr, introducerAddr, relayTag)
+	require.NoError(t, err)
+
+	// Block with garbage signature must be rejected.
+	block := &RelayIntroBlock{
+		AliceRouterHash: make([]byte, 32),
+		Nonce:           relayTag,
+		AliceRelayTag:   relayTag,
+		Timestamp:       uint32(time.Now().Unix()),
+		Version:         2, // SSU2 version byte
+		AlicePort:       9999,
+		AliceIP:         net.ParseIP("203.0.113.4"),
+		Signature:       make([]byte, 64),
+	}
+	fromAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.3"), Port: 8889}
+	err = hpc.HandleHolePunch(sessionID, fromAddr, block)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "signature")
 }
 
 // BUG-M02 fix: TestHolePunchCoordinator_HandleHolePunch_VerifierNotConfigured removed

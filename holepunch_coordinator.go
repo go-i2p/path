@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-i2p/common/data"
 	"github.com/go-i2p/logger"
 	"github.com/samber/oops"
 )
@@ -19,6 +20,53 @@ type PendingSessionRegistry interface {
 	IncrementRetries(sessionID uint64) int
 	RemovePendingSession(sessionID uint64)
 }
+
+// HolePunchVerifyContext carries the peer identities needed to reconstruct the
+// signed RelayIntro payload for verification. The implementer resolves them
+// from session state available at the call site.
+type HolePunchVerifyContext struct {
+	// BobHash is the router identity hash of the relay (Bob) that forwarded
+	// the RelayIntro.
+	BobHash data.Hash
+
+	// CharlieHash is the router identity hash of the introduction target
+	// (Charlie).
+	CharlieHash data.Hash
+}
+
+// HolePunchVerifyInfo describes an incoming hole-punch message and the
+// coordinator state associated with it. It is passed to the
+// HolePunchContextResolver so implementations can map addresses to peer
+// identities without querying the coordinator (which would deadlock: the
+// coordinator mutex is held during verification).
+type HolePunchVerifyInfo struct {
+	// SessionID is the hole-punch session identifier.
+	SessionID uint64
+
+	// FromAddr is the UDP address the packet arrived from.
+	FromAddr *net.UDPAddr
+
+	// RemoteAddr is the attempt's target peer address (Charlie, from the
+	// initiator's perspective).
+	RemoteAddr *net.UDPAddr
+
+	// IntroducerAddr is the attempt's introducer address (Bob).
+	IntroducerAddr *net.UDPAddr
+
+	// Block is the decoded RelayIntro-format block being verified.
+	Block *RelayIntroBlock
+}
+
+// HolePunchContextResolver resolves the verification context for an incoming
+// hole-punch message. The implementation maps the attempt's peer addresses to
+// router identities and resolves the signer's Ed25519 public key (typically
+// via a NetDB lookup of Block.AliceRouterHash).
+//
+// ok=false MUST cause the message to be rejected (fail-closed). Returning
+// ok=true with a nil signerKey is a programming error and also causes
+// rejection.
+type HolePunchContextResolver func(info HolePunchVerifyInfo) (
+	ctx HolePunchVerifyContext, signerKey ed25519.PublicKey, ok bool)
 
 // HolePunchCoordinator coordinates UDP hole punching for NAT traversal.
 // It manages hole punch attempts with state tracking, retries, and timeout handling.
@@ -44,11 +92,12 @@ type HolePunchCoordinator struct {
 	// attempts maps session ID to hole punch attempt
 	attempts map[uint64]*HolePunchAttempt
 
-	// verifyHolePunchSignatureFn is called to verify incoming HolePunch messages.
-	// Per SSU2 spec §Hole Punch, messages transiting through a relay MUST be
-	// authenticated cryptographically. This field is set at construction and
-	// is immutable to prevent misconfiguration.
-	verifyHolePunchSignatureFn func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error
+	// resolveVerifyContext resolves the peer identities and signer key needed
+	// to verify incoming HolePunch messages. Per SSU2 spec §Hole Punch,
+	// messages transiting through a relay MUST be authenticated
+	// cryptographically. This field is set at construction and is immutable
+	// to prevent misconfiguration.
+	resolveVerifyContext HolePunchContextResolver
 
 	// stopCh is closed by Stop() to signal the cleanup goroutine to exit.
 	stopCh chan struct{}
@@ -128,25 +177,26 @@ func (s HolePunchState) String() string {
 
 // NewHolePunchCoordinator creates a new HolePunchCoordinator.
 //
-// L-3 fix: Returns an error instead of panicking on nil verifyFn, following
+// L-3 fix: Returns an error instead of panicking on nil resolver, following
 // Go constructor conventions. Per SSU2 spec §Hole Punch, all messages must be
-// cryptographically authenticated, so a nil verifier is a programming error.
+// cryptographically authenticated, so a nil resolver is a programming error.
 //
 // Parameters:
 //   - manager: The PendingSessionRegistry to coordinate with (typically *RelayManager)
-//   - verifyFn: Function to verify HolePunch message signatures (MUST NOT be nil)
+//   - resolveVerifyContext: Resolves peer identities and the signer key for
+//     HolePunch message signature verification (MUST NOT be nil)
 //
-// Returns a new HolePunchCoordinator, or an error if verifyFn is nil.
-func NewHolePunchCoordinator(manager PendingSessionRegistry, verifyFn func(block *RelayIntroBlock, signerKey ed25519.PublicKey) error) (*HolePunchCoordinator, error) {
+// Returns a new HolePunchCoordinator, or an error if the resolver is nil.
+func NewHolePunchCoordinator(manager PendingSessionRegistry, resolveVerifyContext HolePunchContextResolver) (*HolePunchCoordinator, error) {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "NewHolePunchCoordinator"}).Debug("Creating new HolePunchCoordinator")
-	if verifyFn == nil {
-		return nil, oops.Errorf("hole punch signature verifier cannot be nil - required by SSU2 spec")
+	if resolveVerifyContext == nil {
+		return nil, oops.Errorf("hole punch signature verification context resolver cannot be nil - required by SSU2 spec")
 	}
 	hpc := &HolePunchCoordinator{
-		manager:                    manager,
-		attempts:                   make(map[uint64]*HolePunchAttempt),
-		verifyHolePunchSignatureFn: verifyFn,
-		stopCh:                     make(chan struct{}),
+		manager:              manager,
+		attempts:             make(map[uint64]*HolePunchAttempt),
+		resolveVerifyContext: resolveVerifyContext,
+		stopCh:               make(chan struct{}),
 	}
 	go hpc.cleanupLoop()
 	return hpc, nil
@@ -347,10 +397,18 @@ func (hpc *HolePunchCoordinator) SendHolePunch(sessionID uint64, targetAddr *net
 	return nil
 }
 
-// verifyHolePunchSignatureInternal validates the block signature using the
-// configured verifier. Per SSU2 spec §Hole Punch, signatures are mandatory.
-// The verifier function is guaranteed to be non-nil (checked at construction).
-func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
+// verifyHolePunchSignature validates the block signature using the configured
+// context resolver. Per SSU2 spec §Hole Punch, signatures are mandatory.
+// The resolver is guaranteed to be non-nil (checked at construction).
+//
+// The resolver maps the attempt's peer addresses to router identities
+// (Bob = introducer, Charlie = remote target) and returns the signer's
+// Ed25519 public key. If the resolver returns ok=false, the message is
+// rejected (fail-closed). The resolved context is then used to reconstruct
+// the signed payload and verify the signature.
+//
+// Must be called with hpc.mutex held (the attempt is read by the caller).
+func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, fromAddr *net.UDPAddr, attempt *HolePunchAttempt, block *RelayIntroBlock) error {
 	if block == nil {
 		log.WithFields(logger.Fields{
 			"pkg":        "ssu2",
@@ -363,13 +421,51 @@ func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, bloc
 			With("session_id", sessionID).
 			Errorf("hole punch block cannot be nil - signature verification required per SSU2 spec")
 	}
-	// BUG-M02 fix: verifier is guaranteed non-nil at construction, no need to check
-	if err := hpc.verifyHolePunchSignatureFn(block, signerKey); err != nil {
+
+	info := HolePunchVerifyInfo{
+		SessionID: sessionID,
+		FromAddr:  fromAddr,
+		Block:     block,
+	}
+	if attempt != nil {
+		info.RemoteAddr = attempt.RemoteAddr
+		info.IntroducerAddr = attempt.Introducer
+	}
+
+	ctx, signerKey, ok := hpc.resolveVerifyContext(info)
+	if !ok || signerKey == nil {
+		return oops.
+			Code("CONTEXT_RESOLUTION_FAILED").
+			In("holepunch_coordinator").
+			With("session_id", sessionID).
+			Errorf("failed to resolve verification context for hole punch - rejecting (fail-closed)")
+	}
+
+	valid, err := VerifyRelayRequestSignature(
+		signerKey,
+		block.Signature,
+		ctx.BobHash,
+		ctx.CharlieHash,
+		block.Nonce,
+		block.AliceRelayTag,
+		block.Timestamp,
+		block.Version,
+		block.AlicePort,
+		block.AliceIP,
+	)
+	if err != nil {
+		return oops.
+			Code("SIGNATURE_VERIFICATION_ERROR").
+			In("holepunch_coordinator").
+			With("session_id", sessionID).
+			Wrapf(err, "hole punch signature verification error")
+	}
+	if !valid {
 		return oops.
 			Code("SIGNATURE_VERIFICATION_FAILED").
 			In("holepunch_coordinator").
 			With("session_id", sessionID).
-			Wrapf(err, "hole punch signature verification failed")
+			Errorf("hole punch signature invalid")
 	}
 	return nil
 }
@@ -377,18 +473,18 @@ func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, bloc
 // HandleHolePunch processes an incoming hole punch packet from a remote peer.
 // Per SSU2 spec §Hole Punch, the message's signature MUST be verified before
 // processing. The block parameter MUST NOT be nil - signature verification is
-// mandatory per the SSU2 specification. If VerifyHolePunchSignature is not set,
-// the message is rejected to prevent unauthenticated state transitions.
+// mandatory per the SSU2 specification. The signer key is resolved from the
+// session context via the configured resolver; if resolution fails the message
+// is rejected to prevent unauthenticated state transitions.
 //
 // Parameters:
 //   - sessionID: Session identifier from the packet
 //   - fromAddr: Address the packet came from
 //   - block: The decoded RelayIntro-format block (MUST NOT be nil)
-//   - signerKey: Ed25519 public key of the message signer
 //
 // Returns error if session not found, block is nil, or signature verification fails.
 // BUG-M03 fix: Clarified that block parameter cannot be nil.
-func (hpc *HolePunchCoordinator) HandleHolePunch(sessionID uint64, fromAddr *net.UDPAddr, block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
+func (hpc *HolePunchCoordinator) HandleHolePunch(sessionID uint64, fromAddr *net.UDPAddr, block *RelayIntroBlock) error {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "HandleHolePunch", "sessionID": sessionID}).Debug("Handling hole punch")
 	hpc.mutex.Lock()
 	defer hpc.mutex.Unlock()
@@ -398,7 +494,7 @@ func (hpc *HolePunchCoordinator) HandleHolePunch(sessionID uint64, fromAddr *net
 		return err
 	}
 
-	if err := hpc.verifyHolePunchSignature(sessionID, block, signerKey); err != nil {
+	if err := hpc.verifyHolePunchSignature(sessionID, fromAddr, attempt, block); err != nil {
 		return err
 	}
 
@@ -409,16 +505,17 @@ func (hpc *HolePunchCoordinator) HandleHolePunch(sessionID uint64, fromAddr *net
 // ProcessHolePunchResponse processes a response to a hole punch attempt.
 // Per SSU2 spec §Hole Punch, the response's signature MUST be verified.
 // The block parameter MUST NOT be nil - signature verification is mandatory.
+// The signer key is resolved from the session context via the configured
+// resolver; if resolution fails the response is rejected.
 //
 // Parameters:
 //   - sessionID: Session identifier
 //   - addr: Address that responded
 //   - block: The decoded RelayIntro-format block (MUST NOT be nil)
-//   - signerKey: Ed25519 public key of the message signer
 //
 // Returns error if session not found, block is nil, or signature verification fails.
 // BUG-M03 fix: Clarified that block parameter cannot be nil.
-func (hpc *HolePunchCoordinator) ProcessHolePunchResponse(sessionID uint64, addr *net.UDPAddr, block *RelayIntroBlock, signerKey ed25519.PublicKey) error {
+func (hpc *HolePunchCoordinator) ProcessHolePunchResponse(sessionID uint64, addr *net.UDPAddr, block *RelayIntroBlock) error {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "ProcessHolePunchResponse", "sessionID": sessionID}).Debug("Processing hole punch response")
 	hpc.mutex.Lock()
 	defer hpc.mutex.Unlock()
@@ -428,7 +525,7 @@ func (hpc *HolePunchCoordinator) ProcessHolePunchResponse(sessionID uint64, addr
 		return err
 	}
 
-	if err := hpc.verifyHolePunchSignature(sessionID, block, signerKey); err != nil {
+	if err := hpc.verifyHolePunchSignature(sessionID, addr, attempt, block); err != nil {
 		return err
 	}
 
