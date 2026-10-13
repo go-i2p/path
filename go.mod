@@ -5,9 +5,9 @@ go 1.26.8
 //replace github.com/go-i2p/go-noise => ../go-noise
 
 require (
-	github.com/go-i2p/common v0.1.70002-0.20260928021252-c0bcc3d5067f
-	github.com/go-i2p/crypto v0.1.70002-0.20260922121909-236a5a5632eb
-	github.com/go-i2p/go-noise v0.1.70001-0.20260908221821-85f61a0564cd
+	github.com/go-i2p/common v0.1.70002-0.20261013062227-da2d25f84cdb
+	github.com/go-i2p/crypto v0.1.70002-0.20261013135807-86425eac6c59
+	github.com/go-i2p/go-noise v0.1.70002-0.20261013145830-a7782a85e848
 	github.com/go-i2p/logger v0.1.70001
 	github.com/samber/oops v1.23.1
 	github.com/stretchr/testify v1.12.1
