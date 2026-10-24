@@ -1,11 +1,11 @@
 package ssu2path
 
 import (
-	"crypto/ed25519"
 	"net"
 	"time"
 
 	"github.com/go-i2p/common/data"
+	"github.com/go-i2p/crypto/ed25519"
 	"github.com/go-i2p/logger"
 	"github.com/samber/oops"
 )
@@ -64,7 +64,7 @@ func BuildRelayRequestSignedData(
 
 // SignRelayRequest signs a relay request using Alice's Ed25519 private key.
 func SignRelayRequest(
-	privateKey ed25519.PrivateKey,
+	privateKey ed25519.Ed25519PrivateKey,
 	bobHash, charlieHash data.Hash,
 	nonce, relayTag, timestamp uint32,
 	version uint8,
@@ -76,12 +76,12 @@ func SignRelayRequest(
 	if err != nil {
 		return nil, oops.Wrapf(err, "failed to build relay request signed data")
 	}
-	return signData(privateKey, data), nil
+	return signData(privateKey, data)
 }
 
 // VerifyRelayRequestSignature verifies a relay request signature using Alice's Ed25519 public key.
 func VerifyRelayRequestSignature(
-	publicKey ed25519.PublicKey,
+	publicKey ed25519.Ed25519PublicKey,
 	signature []byte,
 	bobHash, charlieHash data.Hash,
 	nonce, relayTag, timestamp uint32,
@@ -145,7 +145,7 @@ func BuildRelayResponseSignedData(
 // SignRelayResponse signs a relay response using the signer's Ed25519 private key.
 // For accepted responses (code 0), Charlie signs. For Bob rejections (code 1-63), Bob signs.
 func SignRelayResponse(
-	privateKey ed25519.PrivateKey,
+	privateKey ed25519.Ed25519PrivateKey,
 	bobHash data.Hash,
 	nonce, timestamp uint32,
 	version uint8,
@@ -157,14 +157,14 @@ func SignRelayResponse(
 	if err != nil {
 		return nil, oops.Wrapf(err, "failed to build relay response signed data")
 	}
-	return signData(privateKey, data), nil
+	return signData(privateKey, data)
 }
 
 // VerifyRelayResponseSignature verifies a relay response signature.
 // For accepted responses (code 0), use Charlie's public key.
 // For Bob rejections (code 1-63), use Bob's public key.
 func VerifyRelayResponseSignature(
-	publicKey ed25519.PublicKey,
+	publicKey ed25519.Ed25519PublicKey,
 	signature []byte,
 	bobHash data.Hash,
 	nonce, timestamp uint32,

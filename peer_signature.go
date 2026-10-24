@@ -1,10 +1,10 @@
 package ssu2path
 
 import (
-	"crypto/ed25519"
 	"net"
 
 	"github.com/go-i2p/common/data"
+	"github.com/go-i2p/crypto/ed25519"
 	"github.com/go-i2p/logger"
 	"github.com/samber/oops"
 )
@@ -61,7 +61,7 @@ func BuildPeerTestSignedData(
 // SignPeerTest signs peer test data using the signer's Ed25519 private key.
 // For messages 1/2, aliceHash should be nil. For messages 3/4, aliceHash must be provided.
 func SignPeerTest(
-	privateKey ed25519.PrivateKey,
+	privateKey ed25519.Ed25519PrivateKey,
 	bobHash data.Hash, aliceHash *data.Hash,
 	version uint8,
 	nonce, timestamp uint32,
@@ -73,13 +73,13 @@ func SignPeerTest(
 	if err != nil {
 		return nil, oops.Wrapf(err, "failed to build peer test signed data")
 	}
-	return signData(privateKey, data), nil
+	return signData(privateKey, data)
 }
 
 // VerifyPeerTestSignature verifies a peer test signature.
 // For messages 1/2, aliceHash should be nil. For messages 3/4, aliceHash must be provided.
 func VerifyPeerTestSignature(
-	publicKey ed25519.PublicKey,
+	publicKey ed25519.Ed25519PublicKey,
 	signature []byte,
 	bobHash data.Hash, aliceHash *data.Hash,
 	version uint8,

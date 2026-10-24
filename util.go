@@ -1,11 +1,11 @@
 package ssu2path
 
 import (
-	"crypto/ed25519"
 	"encoding/binary"
 	"net"
 	"time"
 
+	"github.com/go-i2p/crypto/ed25519"
 	"github.com/samber/oops"
 )
 
@@ -82,22 +82,27 @@ func buildAddrSuffix(ip net.IP, port uint16) ([]byte, error) {
 
 // signData signs the provided data with the given Ed25519 private key.
 //
-// The SSU2 specification mandates Ed25519 for all block signatures. These
-// helpers use the standard library crypto/ed25519 directly because SSU2 wire
-// signatures are plain Ed25519 over a byte buffer. The github.com/go-i2p/crypto
-// ed25519 package exposes a heavier key-struct / Signer-Verifier API oriented
-// at I2P key types (with blinding) and is not the right fit for raw wire
-// signatures, so it is intentionally not used here.
-func signData(privateKey ed25519.PrivateKey, data []byte) []byte {
-	return ed25519.Sign(privateKey, data)
+// The SSU2 specification mandates Ed25519 for all block signatures. Signing is
+// delegated to github.com/go-i2p/crypto/ed25519 (the I2P crypto module) rather
+// than the standard library, so that all Ed25519 operations in this package go
+// through the shared go-i2p crypto implementation.
+func signData(privateKey ed25519.Ed25519PrivateKey, data []byte) ([]byte, error) {
+	signer, err := privateKey.NewSigner()
+	if err != nil {
+		return nil, err
+	}
+	return signer.Sign(data)
 }
 
 // verifyData verifies an Ed25519 signature over the provided data.
 //
-// See signData for the rationale on using standard library crypto/ed25519 for
-// SSU2 wire signatures.
-func verifyData(publicKey ed25519.PublicKey, data, signature []byte) bool {
-	return ed25519.Verify(publicKey, data, signature)
+// See signData for the rationale on delegating Ed25519 to go-i2p/crypto.
+func verifyData(publicKey ed25519.Ed25519PublicKey, data, signature []byte) bool {
+	verifier, err := publicKey.NewVerifier()
+	if err != nil {
+		return false
+	}
+	return verifier.Verify(data, signature) == nil
 }
 
 // addrEqual reports whether two *net.UDPAddr values refer to the same endpoint.

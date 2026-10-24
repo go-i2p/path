@@ -1,11 +1,11 @@
 package ssu2path
 
 import (
-	"crypto/ed25519"
-	"github.com/go-i2p/crypto/rand"
 	"net"
 	"testing"
 
+	"github.com/go-i2p/crypto/ed25519"
+	"github.com/go-i2p/crypto/rand"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -385,7 +385,7 @@ func TestDecodeRelayTag_InvalidSize(t *testing.T) {
 // TestRelayBlocks_Ed25519Signature_Integration tests relay blocks with real Ed25519 signatures.
 func TestRelayBlocks_Ed25519Signature_Integration(t *testing.T) {
 	// Generate Ed25519 key pair
-	pubKey, privKey, err := ed25519.GenerateKey(nil)
+	pubKey, privKey, err := ed25519.GenerateEd25519KeyPair()
 	require.NoError(t, err)
 
 	// Create relay request
@@ -401,7 +401,10 @@ func TestRelayBlocks_Ed25519Signature_Integration(t *testing.T) {
 
 	// Sign it (simplified - in real use, would sign structured data)
 	message := []byte("test message")
-	req.Signature = ed25519.Sign(privKey, message)
+	signer, err := (*privKey).NewSigner()
+	require.NoError(t, err)
+	req.Signature, err = signer.Sign(message)
+	require.NoError(t, err)
 
 	// Encode and decode
 	block, err := EncodeRelayRequest(req)
@@ -411,5 +414,7 @@ func TestRelayBlocks_Ed25519Signature_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify signature survived round-trip
-	assert.True(t, ed25519.Verify(pubKey, message, decoded.Signature))
+	verifier, err := (*pubKey).NewVerifier()
+	require.NoError(t, err)
+	assert.NoError(t, verifier.Verify(message, decoded.Signature))
 }

@@ -1,14 +1,14 @@
 package ssu2path
 
 import (
-	"crypto/ed25519"
-	"github.com/go-i2p/crypto/rand"
 	"encoding/binary"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/go-i2p/common/data"
+	"github.com/go-i2p/crypto/ed25519"
+	"github.com/go-i2p/crypto/rand"
 	"github.com/go-i2p/logger"
 	"github.com/samber/oops"
 )
@@ -70,7 +70,7 @@ type HolePunchVerifyInfo struct {
 // ok=true with a nil signerKey is a programming error and also causes
 // rejection.
 type HolePunchContextResolver func(info HolePunchVerifyInfo) (
-	ctx HolePunchVerifyContext, signerKey ed25519.PublicKey, ok bool)
+	ctx HolePunchVerifyContext, signerKey ed25519.Ed25519PublicKey, ok bool)
 
 // HolePunchCoordinator coordinates UDP hole punching for NAT traversal.
 // It manages hole punch attempts with state tracking, retries, and timeout handling.

@@ -1,13 +1,13 @@
 package ssu2path
 
 import (
-	"crypto/ed25519"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-i2p/common/data"
+	"github.com/go-i2p/crypto/ed25519"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,9 +16,18 @@ import (
 var (
 	testBobHash     = data.Hash{0x01}
 	testCharlieHash = data.Hash{0x02}
-	testAlicePriv   = ed25519.NewKeyFromSeed(make([]byte, 32))
-	testAlicePub    = testAlicePriv.Public().(ed25519.PublicKey)
+	testAlicePriv   ed25519.Ed25519PrivateKey
+	testAlicePub    ed25519.Ed25519PublicKey
 )
+
+func init() {
+	pub, priv, err := ed25519.GenerateEd25519KeyPair()
+	if err != nil {
+		panic(err)
+	}
+	testAlicePriv = *priv
+	testAlicePub = *pub
+}
 
 // createTestHolePunchCoordinator creates a HolePunchCoordinator for testing.
 // The resolver accepts every lookup and returns a fixed test key pair; tests
@@ -30,7 +39,7 @@ func createTestHolePunchCoordinator(t *testing.T) *HolePunchCoordinator {
 	manager := NewRelayManager(nil)
 
 	// Provide a default resolver that always succeeds (for testing)
-	resolver := func(info HolePunchVerifyInfo) (HolePunchVerifyContext, ed25519.PublicKey, bool) {
+	resolver := func(info HolePunchVerifyInfo) (HolePunchVerifyContext, ed25519.Ed25519PublicKey, bool) {
 		return HolePunchVerifyContext{BobHash: testBobHash, CharlieHash: testCharlieHash}, testAlicePub, true
 	}
 
@@ -43,7 +52,7 @@ func createTestHolePunchCoordinator(t *testing.T) *HolePunchCoordinator {
 func TestNewHolePunchCoordinator(t *testing.T) {
 	manager := NewRelayManager(nil)
 
-	resolver := func(info HolePunchVerifyInfo) (HolePunchVerifyContext, ed25519.PublicKey, bool) {
+	resolver := func(info HolePunchVerifyInfo) (HolePunchVerifyContext, ed25519.Ed25519PublicKey, bool) {
 		return HolePunchVerifyContext{}, testAlicePub, true
 	}
 
@@ -760,7 +769,7 @@ func TestHolePunchCoordinator_HandleHolePunch_SignatureVerificationFails(t *test
 	manager := NewRelayManager(nil)
 
 	// Resolver that fails closed (simulates unknown peer / missing key)
-	resolver := func(info HolePunchVerifyInfo) (HolePunchVerifyContext, ed25519.PublicKey, bool) {
+	resolver := func(info HolePunchVerifyInfo) (HolePunchVerifyContext, ed25519.Ed25519PublicKey, bool) {
 		return HolePunchVerifyContext{}, nil, false
 	}
 	hpc, err := NewHolePunchCoordinator(manager, resolver)
