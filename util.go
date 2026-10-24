@@ -81,11 +81,21 @@ func buildAddrSuffix(ip net.IP, port uint16) ([]byte, error) {
 }
 
 // signData signs the provided data with the given Ed25519 private key.
+//
+// The SSU2 specification mandates Ed25519 for all block signatures. These
+// helpers use the standard library crypto/ed25519 directly because SSU2 wire
+// signatures are plain Ed25519 over a byte buffer. The github.com/go-i2p/crypto
+// ed25519 package exposes a heavier key-struct / Signer-Verifier API oriented
+// at I2P key types (with blinding) and is not the right fit for raw wire
+// signatures, so it is intentionally not used here.
 func signData(privateKey ed25519.PrivateKey, data []byte) []byte {
 	return ed25519.Sign(privateKey, data)
 }
 
 // verifyData verifies an Ed25519 signature over the provided data.
+//
+// See signData for the rationale on using standard library crypto/ed25519 for
+// SSU2 wire signatures.
 func verifyData(publicKey ed25519.PublicKey, data, signature []byte) bool {
 	return ed25519.Verify(publicKey, data, signature)
 }

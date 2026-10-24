@@ -366,6 +366,10 @@ func DescribeNATCapabilities(natType NATType) string {
 // isLocalAddress reports whether ip is assigned to a local network interface.
 // Used by DetermineNATType to distinguish NATNone from NATCone.
 //
+// The net.Interfaces() call is an intentional, in-scope use: NAT detection
+// inherently requires knowing the host's local interfaces to classify the NAT
+// type, so this belongs in this package rather than in a shared dependency.
+//
 // L-7 fix: check pure-computation predicates first (loopback, private, link-local)
 // to avoid the net.Interfaces() syscall in the common case. Only fall back to
 // interface enumeration for addresses that pass those checks (uncommon in NAT context).

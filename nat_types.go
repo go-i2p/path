@@ -6,6 +6,22 @@ import (
 )
 
 // NATType represents the type of NAT detected.
+//
+// The SSU2 specification (Peer Test section) defines four peer-test *result*
+// states per address type: UNKNOWN, OK, FIREWALLED, and SYMNAT. This type is a
+// finer-grained NAT *classification* that refines those results for callers:
+//
+//   - NATUnknown        <- UNKNOWN (insufficient messages received)
+//   - NATNone           <- OK, no NAT (public IP; external == internal)
+//   - NATCone           <- OK, full cone (directly reachable from any peer)
+//   - NATRestricted     <- OK, restricted cone (reachable from tested peers)
+//   - NATPortRestricted <- OK, port-restricted cone (reachable from tested peers)
+//   - NATSymmetric      <- SYMNAT (external address depends on destination)
+//
+// FIREWALLED (OK result but the peer cannot be reached directly) is represented
+// by the Reachable/DirectProbeSuccess/RelayedProbeSuccess fields on TestResult
+// rather than as a distinct NATType, since a firewalled peer may still have a
+// determinable cone/symmetric classification.
 type NATType int
 
 const (

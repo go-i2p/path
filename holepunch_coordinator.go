@@ -84,7 +84,8 @@ type HolePunchContextResolver func(info HolePunchVerifyInfo) (
 //
 // Design rationale:
 // - Session IDs are cryptographically random 64-bit values for security
-// - Maximum 3 retry attempts per I2P convention
+// - Maximum 3 retry attempts (implementation choice; the spec does not mandate
+//   a specific Hole Punch retry count)
 // - 30-second timeout per attempt (implementation choice; the spec does not
 //   mandate a specific Hole Punch timeout)
 // - State machine: Requested → Sent → Waiting → Success/Failed
@@ -608,7 +609,8 @@ func (hpc *HolePunchCoordinator) RetryHolePunch(sessionID uint64) error {
 		return err
 	}
 
-	// Check max retries (3 per I2P convention)
+	// Check max retries (3 is an implementation choice; the spec does not
+	// mandate a specific Hole Punch retry count)
 	if attempt.Retries >= 3 {
 		attempt.State = HolePunchFailed
 		return oops.

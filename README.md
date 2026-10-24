@@ -7,7 +7,7 @@ SSU2 path management for the I2P network in Go. This package (`ssu2path`) implem
 ## Requirements
 
 - Go 1.26.1 or later
-- `github.com/go-i2p/go-noise` (local replace directive required — see `go.mod`)
+- `github.com/go-i2p/go-noise` (for the SSU2 wire types; a local `replace` directive is available in `go.mod` for development against a local checkout)
 
 ---
 
@@ -17,25 +17,16 @@ SSU2 path management for the I2P network in Go. This package (`ssu2path`) implem
 go get github.com/go-i2p/path
 ```
 
-Because the module uses a `replace` directive for `github.com/go-i2p/go-noise`, clone both repositories under the same parent directory:
-
-```bash
-git clone https://github.com/go-i2p/go-noise
-git clone https://github.com/go-i2p/path
-cd path
-go build ./...
-```
-
 ---
 
 ## Usage
 
 ### HolePunchCoordinator
 
-Coordinates UDP hole punching with state tracking, retries, and signature verification. A `PendingSessionRegistry` (e.g. `*RelayManager`) must be provided at construction.
+Coordinates UDP hole punching with state tracking, retries, and signature verification. A `PendingSessionRegistry` (e.g. `*RelayManager`) and a `HolePunchContextResolver` (resolves the Noise session context for signature verification) must be provided at construction.
 
 ```go
-coordinator := ssu2path.NewHolePunchCoordinator(relayManager, verifyFn)
+coordinator, err := ssu2path.NewHolePunchCoordinator(relayManager, resolveContext)
 defer coordinator.Stop() // REQUIRED — stops the background cleanup goroutine
 
 sessionID, err := coordinator.InitiateHolePunch(remoteAddr, introducerAddr, relayTag)
@@ -70,10 +61,14 @@ result := ptm.GetResult(remoteAddr)
 Validates connection migration to a new UDP path using Path Challenge (Type 18) and Path Response (Type 19) blocks.
 
 ```go
-validator := ssu2path.NewPathValidator(conn, tokenCache, congestionController)
+validator := ssu2path.NewPathValidator(conn)
 defer validator.Stop() // REQUIRED
 
-err := validator.InitiatePathValidation(newAddr)
+// Optional: wire in token invalidation and congestion control
+validator.SetTokenCache(tokenCache)
+validator.SetCongestionController(congestionController)
+
+challengeData, err := validator.InitiatePathValidation(newAddr)
 ```
 
 ### IntroducerRegistry
@@ -82,7 +77,13 @@ Maintains up to three introducers (per I2P specification) for RouterInfo publica
 
 ```go
 registry := ssu2path.NewIntroducerRegistry(3)
-err := registry.AddIntroducer(addr, routerHash, staticKey, introKey, relayTag)
+err := registry.AddIntroducer(&ssu2path.RegisteredIntroducer{
+	Addr:       addr,
+	RouterHash: routerHash,
+	StaticKey:  staticKey,
+	IntroKey:   introKey,
+	RelayTag:   relayTag,
+})
 introducers := registry.GetIntroducers()
 ```
 
@@ -102,12 +103,15 @@ port     := ssu2path.ExtractExternalPort(result)
 
 ### Path Challenge / Response Blocks
 
-```go
-challengeBlock := ssu2path.EncodePathChallenge(challengeID)
-responseBlock  := ssu2path.EncodePathResponse(challengeID)
+Challenge data is arbitrary bytes (the spec recommends at least 8 bytes of
+random data); the Path Response echoes the challenge data verbatim.
 
-id, err := ssu2path.DecodePathChallenge(block)
-id, err  = ssu2path.DecodePathResponse(block)
+```go
+challengeBlock := ssu2path.EncodePathChallenge(challengeData)
+responseBlock  := ssu2path.EncodePathResponse(challengeData)
+
+data, err := ssu2path.DecodePathChallenge(block)
+data, err = ssu2path.DecodePathResponse(block)
 ```
 
 ---
