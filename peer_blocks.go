@@ -218,9 +218,26 @@ func DecodePeerTestBlock(ssu2Block *SSU2Block) (*PeerTestBlock, error) {
 		return nil, oops.Errorf("invalid message code: %d (must be 1-7)", block.MessageCode)
 	}
 
+	// Per SSU2 spec (PeerTest block): "reject codes only allowed in messages 3
+	// and 4." A non-zero reject code in any other message is invalid.
+	if block.Code != 0 && block.MessageCode != 3 && block.MessageCode != 4 {
+		return nil, oops.Errorf("reject code %d not allowed in PeerTest message %d (only messages 3 and 4 may carry a reject code)", block.Code, block.MessageCode)
+	}
+
 	off, err := block.decodeRouterHash(rawData, off)
 	if err != nil {
 		return nil, err
+	}
+
+	// Per SSU2 spec (PeerTest block): "All zeros (fake hash) in message 4 if
+	// rejected by Bob." A reject code of 1-63 means "rejected by Bob", so the
+	// router hash in message 4 MUST be all zeros.
+	if block.MessageCode == 4 && block.Code >= 1 && block.Code <= 63 {
+		for _, b := range block.RouterHash {
+			if b != 0 {
+				return nil, oops.Errorf("PeerTest message 4 rejected by Bob (code %d) must carry an all-zeros router hash", block.Code)
+			}
+		}
 	}
 
 	off, err = block.decodeSignedFields(rawData, off)

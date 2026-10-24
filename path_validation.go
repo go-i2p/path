@@ -196,6 +196,14 @@ const (
 	MTUProbeStep = 20
 )
 
+// MinCongestionWindow is the minimum congestion window per the SSU2 spec
+// (Connection Migration → Initiating Path Validation: "Reduce the congestion
+// window to the minimum"). It is 1280 bytes, matching the spec's minimum
+// congestion window. This is a distinct quantity from MinMTU (the minimum
+// packet size); the two happen to share the same numeric value but must not
+// be conflated.
+const MinCongestionWindow = 1280
+
 // NewPathValidator creates a new path validator for a connection.
 //
 // BUG-M07 fix: Now starts a background cleanup goroutine. Callers MUST call
@@ -263,12 +271,16 @@ func (pv *PathValidator) SetCongestionController(cc CongestionControllerAccessor
 // "the congestion window and PMTU must remain at the minimum values during
 // the path validation phase". The PMTU is held at MinMTU (1280) by the
 // caller, which sends only Path Challenge blocks (no data) during validation.
+//
+// The congestion window is set to MinCongestionWindow (the spec's minimum
+// congestion window), NOT MinMTU — these are distinct quantities that happen
+// to share the same numeric value.
 func (pv *PathValidator) reduceCongestionForValidation() {
 	pv.mutex.RLock()
 	cc := pv.congestionController
 	pv.mutex.RUnlock()
 	if cc != nil {
-		cc.SetCWND(MinMTU)
+		cc.SetCWND(MinCongestionWindow)
 	}
 }
 
@@ -453,12 +465,11 @@ func (pv *PathValidator) HandlePathResponse(block *SSU2Block, fromAddr *net.UDPA
 		return nil
 	}
 
-	// Verify response came from expected address (M-01 fix: use addrEqual for IPv4/IPv6 parity)
-	if !addrEqual(challenge.NewAddr, fromAddr) {
-		pv.mutex.Unlock()
-		return oops.Errorf("path response from unexpected address: expected %v, got %v",
-			challenge.NewAddr, fromAddr)
-	}
+	// The spec (Connection Migration → Initiating Path Validation) states that
+	// "the source IP/port of the Path Response message is not required to be the
+	// same as the Path Challenge was sent to." The authoritative validation is the
+	// opaque challenge-data match above (at least 8 bytes of entropy, so it cannot
+	// be spoofed); the source address is therefore NOT compared here.
 
 	// Mark as validated
 	challenge.State = ChallengeValidated

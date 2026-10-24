@@ -5,6 +5,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/go-i2p/common/data"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -213,6 +214,34 @@ func TestDecodePeerTestBlock_InvalidAsz(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid asz")
 }
 
+// TestDecodePeerTestBlock_RejectCodeWrongMessage tests that a non-zero reject
+// code is rejected in messages other than 3 and 4, per the SSU2 spec (PeerTest
+// block): "reject codes only allowed in messages 3 and 4."
+func TestDecodePeerTestBlock_RejectCodeWrongMessage(t *testing.T) {
+	// Message 1 (Request) must not carry a reject code.
+	block := makePeerTestBlock(PeerTestRequest)
+	block.Code = 1
+	encoded, err := EncodePeerTestBlock(block)
+	require.NoError(t, err)
+
+	_, err = DecodePeerTestBlock(encoded)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not allowed in PeerTest message")
+}
+
+// TestDecodePeerTestBlock_RejectCodeAllowedInMsg3 tests that a non-zero reject
+// code is accepted in message 3 (Response), where reject codes are allowed.
+func TestDecodePeerTestBlock_RejectCodeAllowedInMsg3(t *testing.T) {
+	block := makePeerTestBlock(PeerTestResponse)
+	block.Code = 1
+	encoded, err := EncodePeerTestBlock(block)
+	require.NoError(t, err)
+
+	decoded, err := DecodePeerTestBlock(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(1), decoded.Code)
+}
+
 // TestEncodeDecode_RoundTrip tests round-trip for all message types.
 func TestEncodeDecode_RoundTrip(t *testing.T) {
 	for msg := PeerTestRequest; msg <= PeerTestConfirmation; msg++ {
@@ -220,6 +249,11 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 			block := makePeerTestBlock(msg)
 			if msg == PeerTestResult {
 				block.Code = 1
+				// Per SSU2 spec (PeerTest block): "All zeros (fake hash) in message
+				// 4 if rejected by Bob." Code 1 is a Bob rejection, so the router
+				// hash must be all zeros.
+				var zeroHash data.Hash
+				block.RouterHash = &zeroHash
 			}
 
 			encoded, err := EncodePeerTestBlock(block)

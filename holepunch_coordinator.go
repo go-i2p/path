@@ -509,13 +509,13 @@ func (hpc *HolePunchCoordinator) HandleHolePunch(sessionID uint64, fromAddr *net
 		return err
 	}
 
-	// Per SSU2 spec §Hole Punch: "If Charlie is behind a symmetric NAT, his
-	// reported port in the Relay Response and Hole Punch may not be accurate.
-	// Therefore, Alice should check the UDP source port of the Hole Punch
-	// message, and use that if it is different than the reported port."
-	// The UDP source address (fromAddr) is authoritative; if it differs from
-	// the port reported in the block, update the remote address to use the
-	// source port so subsequent connections target the correct endpoint.
+	// Per the SSU2 spec (Relay Process → Response Handling): "If Charlie is
+	// behind a symmetric NAT, his reported port in the Relay Response and Hole
+	// Punch may not be accurate. Therefore, Alice should check the UDP source
+	// port of the Hole Punch message, and use that if it is different than the
+	// reported port." The UDP source address (fromAddr) is authoritative; if it
+	// differs from the port reported in the block, update the remote address to
+	// use the source port so subsequent connections target the correct endpoint.
 	if block.CharliePort != 0 && block.CharliePort != uint16(fromAddr.Port) {
 		log.WithFields(logger.Fields{
 			"pkg": "ssu2", "func": "HandleHolePunch", "sessionID": sessionID,
@@ -556,8 +556,18 @@ func (hpc *HolePunchCoordinator) ProcessHolePunchResponse(sessionID uint64, addr
 		return err
 	}
 
-	// Verify address matches expected remote (M-01 fix: use addrEqual for IPv4/IPv6 parity)
-	if !addrEqual(attempt.RemoteAddr, addr) {
+	// Verify the response came from the expected remote host. Per the SSU2 spec
+	// (Relay Process → Response Handling): "If Charlie is behind a symmetric NAT,
+	// his reported port in the Relay Response and Hole Punch may not be accurate.
+	// Therefore, Alice should check the UDP source port of the Hole Punch message,
+	// and use that if it is different than the reported port."
+	//
+	// Only the IP is compared here (not the port): for a symmetric NAT the source
+	// port legitimately differs from the reported port, and that difference is
+	// handled by the correction below. Comparing the port here would reject the
+	// exact symmetric-NAT case the correction is meant to support. The IP check
+	// still rejects responses from a different host.
+	if !attempt.RemoteAddr.IP.Equal(addr.IP) {
 		return oops.
 			Code("ADDRESS_MISMATCH").
 			In("holepunch_coordinator").
@@ -567,13 +577,10 @@ func (hpc *HolePunchCoordinator) ProcessHolePunchResponse(sessionID uint64, addr
 			Errorf("response address does not match expected remote")
 	}
 
-	// Per SSU2 spec §Hole Punch: "If Charlie is behind a symmetric NAT, his
-	// reported port in the Relay Response and Hole Punch may not be accurate.
-	// Therefore, Alice should check the UDP source port of the Hole Punch
-	// message, and use that if it is different than the reported port."
-	// The UDP source address (addr) is authoritative; if it differs from the
-	// port reported in the block, update the remote address to use the source
-	// port so subsequent connections target the correct endpoint.
+	// Per the SSU2 spec (Relay Process → Response Handling), the UDP source
+	// address (addr) is authoritative; if the source port differs from the port
+	// reported in the block, update the remote address to use the source port so
+	// subsequent connections target the correct endpoint.
 	if block.CharliePort != 0 && block.CharliePort != uint16(addr.Port) {
 		log.WithFields(logger.Fields{
 			"pkg": "ssu2", "func": "ProcessHolePunchResponse", "sessionID": sessionID,

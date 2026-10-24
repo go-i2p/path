@@ -23,7 +23,8 @@ const RelayResponseTokenTTL = 10 * time.Second
 //
 // Design rationale:
 // - Relay tags are cryptographically random 4-byte values for security
-// - Introducers expire after 1 hour (I2P spec recommendation)
+// - Introducers expire after 1 hour (implementation choice; the SSU2 spec
+//   does not mandate a specific introducer expiry value)
 // - Pending sessions track connections awaiting hole punch completion
 // - Thread-safe for concurrent relay operations
 //

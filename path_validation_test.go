@@ -237,8 +237,13 @@ func TestPathValidator_HandlePathResponse_NoMatchingChallenge(t *testing.T) {
 	assert.Contains(t, err.Error(), "no matching challenge")
 }
 
-// TestPathValidator_HandlePathResponse_WrongAddress tests response from wrong address.
-func TestPathValidator_HandlePathResponse_WrongAddress(t *testing.T) {
+// TestPathValidator_HandlePathResponse_DifferentAddress verifies that a Path
+// Response from a different source IP/port than the challenge was sent to is
+// still accepted, per the SSU2 spec (Connection Migration → Successful Path
+// Validation): "The source IP/port of the Path Response message is not
+// required to be the same as the Path Challenge was sent to." The opaque
+// challenge data is the authoritative validation.
+func TestPathValidator_HandlePathResponse_DifferentAddress(t *testing.T) {
 	conn := &mockPathValidationConn{}
 	pv := NewPathValidator(conn)
 
@@ -247,17 +252,16 @@ func TestPathValidator_HandlePathResponse_WrongAddress(t *testing.T) {
 	challengeData, err := pv.InitiatePathValidation(addrA)
 	require.NoError(t, err)
 
-	// Receive response from address B
+	// Receive response from a different address B (different IP and port).
+	// Per spec this is acceptable; the challenge data match is what matters.
 	addrB := &net.UDPAddr{IP: net.ParseIP("10.0.0.50"), Port: 9090}
 	responseBlock := EncodePathResponse(challengeData)
 	err = pv.HandlePathResponse(responseBlock, addrB)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "unexpected address")
+	assert.NoError(t, err)
 
-	// Challenge should still exist
-	challenge, exists := pv.GetChallenge(challengeData)
-	require.True(t, exists)
-	assert.Equal(t, ChallengeSent, challenge.State)
+	// Challenge should have been validated and removed (completed)
+	_, exists := pv.GetChallenge(challengeData)
+	assert.False(t, exists)
 }
 
 // TestPathValidator_HandlePathResponse_NilBlock tests nil block handling.
