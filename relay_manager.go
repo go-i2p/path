@@ -1,7 +1,7 @@
 package ssu2path
 
 import (
-	"crypto/rand"
+	"github.com/go-i2p/crypto/rand"
 	"encoding/binary"
 	"net"
 	"sync"

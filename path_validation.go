@@ -15,7 +15,7 @@ package ssu2path
 
 import (
 	"context"
-	"crypto/rand"
+	"github.com/go-i2p/crypto/rand"
 	"net"
 	"sync"
 	"time"
