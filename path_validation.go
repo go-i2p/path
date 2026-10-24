@@ -37,6 +37,34 @@ type CongestionControllerAccessor interface {
 	SetCWND(cwnd int)
 }
 
+// CongestionCapSetter is an optional interface that congestion controllers
+// may implement to hold the congestion window at a cap during path
+// validation. Per the SSU2 spec (Connection Migration): "the congestion
+// window and PMTU must remain at the minimum values during the path
+// validation phase". Setting a cap prevents the controller from increasing
+// CWND above the minimum while validation is in progress.
+type CongestionCapSetter interface {
+	// SetCongestionCap holds the congestion window at the given value.
+	// The controller must not increase CWND above this value while the
+	// cap is active.
+	SetCongestionCap(cwnd int)
+	// ClearCongestionCap removes the congestion window cap, allowing the
+	// controller to increase CWND again.
+	ClearCongestionCap()
+}
+
+// HandshakePhase is an optional interface that SSU2 connections may
+// implement to report whether the session is still in the handshake phase.
+// Per the SSU2 spec (Connection Migration): "This process is defined only for
+// the data phase of a session. Migration is not permitted during the
+// handshake." PathValidator uses this to refuse to initiate path validation
+// while the handshake is in progress.
+type HandshakePhase interface {
+	// InHandshake reports whether the session is still in the handshake
+	// phase (i.e. not yet in the data phase).
+	InHandshake() bool
+}
+
 // PathValidator implements connection migration with path validation.
 //
 // Path validation allows an SSU2 connection to migrate to a new UDP path
@@ -72,6 +100,11 @@ type PathValidator struct {
 	// discoveredMTU is the largest packet size that received a response
 	// during MTU probing. 0 means no probe has completed yet.
 	discoveredMTU int
+
+	// activeValidations counts in-flight path validations. The congestion
+	// cap is only cleared when the last validation completes, so that
+	// concurrent validations all hold the cap.
+	activeValidations int
 
 	// stopCh is closed by Stop() to signal the cleanup goroutine to exit.
 	// BUG-M07 fix: Added to enable proper resource cleanup
@@ -129,6 +162,12 @@ type PathChallenge struct {
 	// BUG-014 fix: done is closed when the challenge completes (validated or failed)
 	// to wake RunPMTUD without polling
 	done chan struct{}
+
+	// counted is true when this challenge was created by InitiatePathValidation
+	// and therefore incremented activeValidations. Completion paths use it to
+	// decrement the counter exactly once. Challenges created directly via
+	// CreateChallenge (e.g. MTU probes) are not counted.
+	counted bool
 }
 
 // PathChallengeState represents the state of a path validation attempt.
@@ -229,6 +268,18 @@ func NewPathValidator(conn PathValidationConn) *PathValidator {
 // BUG-M07 fix: Added to mirror RelayManager/HolePunchCoordinator pattern.
 func (pv *PathValidator) Stop() {
 	pv.stopOnce.Do(func() { close(pv.stopCh) })
+	// Release the congestion cap if any validations were in flight, so the
+	// congestion controller is not left capped after the validator stops.
+	// The validator is being torn down, so clear unconditionally and reset
+	// the counter.
+	pv.mutex.Lock()
+	pv.activeValidations = 0
+	if cc := pv.congestionController; cc != nil {
+		if capSetter, ok := cc.(CongestionCapSetter); ok {
+			capSetter.ClearCongestionCap()
+		}
+	}
+	pv.mutex.Unlock()
 }
 
 // cleanupLoop periodically removes expired path validation challenges.
@@ -276,11 +327,52 @@ func (pv *PathValidator) SetCongestionController(cc CongestionControllerAccessor
 // congestion window), NOT MinMTU — these are distinct quantities that happen
 // to share the same numeric value.
 func (pv *PathValidator) reduceCongestionForValidation() {
-	pv.mutex.RLock()
+	pv.mutex.Lock()
 	cc := pv.congestionController
-	pv.mutex.RUnlock()
+	pv.activeValidations++
+	first := pv.activeValidations == 1
+	pv.mutex.Unlock()
 	if cc != nil {
 		cc.SetCWND(MinCongestionWindow)
+		// Per the SSU2 spec (Connection Migration): "the congestion window
+		// and PMTU must remain at the minimum values during the path
+		// validation phase". Set a cap so the controller cannot increase
+		// CWND above the minimum while validation is in progress. Only set
+		// the cap on the first in-flight validation; concurrent validations
+		// share it.
+		if first {
+			if capSetter, ok := cc.(CongestionCapSetter); ok {
+				capSetter.SetCongestionCap(MinCongestionWindow)
+			}
+		}
+	}
+}
+
+// releaseValidation decrements the in-flight validation counter for a
+// challenge that was counted by InitiatePathValidation, and clears the
+// congestion window cap when the last in-flight validation completes.
+//
+// It is called at every point where a counted challenge is removed from
+// pv.challenges (successful migration, SetRemoteAddr failure, or failure).
+// Challenges that were not counted (e.g. MTU probes created via
+// CreateChallenge) are no-ops.
+//
+// Caller must hold pv.mutex (write lock).
+func (pv *PathValidator) releaseValidation(ch *PathChallenge) {
+	if ch == nil || !ch.counted {
+		return
+	}
+	ch.counted = false
+	if pv.activeValidations > 0 {
+		pv.activeValidations--
+	}
+	if pv.activeValidations > 0 {
+		return
+	}
+	if cc := pv.congestionController; cc != nil {
+		if capSetter, ok := cc.(CongestionCapSetter); ok {
+			capSetter.ClearCongestionCap()
+		}
 	}
 }
 
@@ -289,6 +381,18 @@ func (pv *PathValidator) reduceCongestionForValidation() {
 // This sends a Path Challenge (Type 18) block to the new address with
 // cryptographically random challenge data. The peer must respond with a
 // Path Response (Type 19) containing the same challenge data.
+//
+// Per the SSU2 spec (Connection Migration), path validation is defined only
+// for the data phase of a session; it is refused while the handshake is in
+// progress (see the HandshakePhase interface).
+//
+// Cross-address-family migration: the spec states peers "are NOT required to
+// support migration between IPv4 and IPv6, and may treat a new IP in the
+// other address family as invalid." InitiatePathValidation does not itself
+// reject a new address in a different IP family than the current remote
+// address; callers that do not wish to support cross-family migration should
+// compare the IP family of newAddr against the current remote address and
+// reject (or drop) the validation before calling this method.
 //
 // Parameters:
 //   - newAddr: The new UDP address to validate
@@ -300,6 +404,14 @@ func (pv *PathValidator) InitiatePathValidation(newAddr *net.UDPAddr) ([]byte, e
 	log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "InitiatePathValidation"}).Debug("Initiating path validation")
 	if newAddr == nil {
 		return nil, oops.Errorf("new address is nil")
+	}
+
+	// Per the SSU2 spec (Connection Migration): "This process is defined only
+	// for the data phase of a session. Migration is not permitted during the
+	// handshake." Refuse to initiate path validation while the handshake is
+	// still in progress.
+	if hs, ok := pv.conn.(HandshakePhase); ok && hs.InHandshake() {
+		return nil, oops.Errorf("path validation is not permitted during the handshake")
 	}
 
 	// Generate cryptographic random challenge data (8 bytes recommended)
@@ -318,6 +430,7 @@ func (pv *PathValidator) InitiatePathValidation(newAddr *net.UDPAddr) ([]byte, e
 		ResponseTimer: PathResponseBaseTimer,
 		State:         ChallengeSent,
 		done:          make(chan struct{}),
+		counted:       true,
 	}
 
 	key := string(challengeData)
@@ -335,6 +448,7 @@ func (pv *PathValidator) InitiatePathValidation(newAddr *net.UDPAddr) ([]byte, e
 	if err := pv.SendPathChallenge(challengeData, newAddr); err != nil {
 		pv.mutex.Lock()
 		delete(pv.challenges, key)
+		pv.releaseValidation(challenge)
 		pv.mutex.Unlock()
 		return nil, oops.Wrapf(err, "failed to send path challenge")
 	}
@@ -526,6 +640,12 @@ func (pv *PathValidator) ValidatePath(challengeData []byte) error {
 	// This ensures side effects execute exactly once even with concurrent calls
 	delete(pv.challenges, key)
 
+	// The validation phase for this challenge is over (migration succeeded or
+	// is about to be attempted). Release the congestion cap if this was the
+	// last in-flight validation. Per the SSU2 spec (Connection Migration):
+	// "Do not simply restore them to the old values."
+	pv.releaseValidation(challenge)
+
 	// BUG-006 fix: Read accessor fields under lock to prevent race
 	tokenCache := pv.tokenCache
 	congestionController := pv.congestionController
@@ -562,6 +682,20 @@ func (pv *PathValidator) ValidatePath(challengeData []byte) error {
 
 // FailPath marks a path validation as failed.
 //
+// Per the SSU2 spec (Connection Migration, "Failed Path Validation"), on a
+// failed validation the session must "exit the path validation phase" and
+// "send all packets to the old IP and port". FailPath satisfies the
+// path-management half of that contract: it never calls SetRemoteAddr, so the
+// connection's remote address remains the old (pre-validation) path, and it
+// releases the congestion cap so the controller can resume normal operation.
+//
+// The spec also requires: "Retransmit any data packets that were previously
+// sent to the new IP/port to the old IP/port." That retransmission is owned by
+// the transport/reliability layer (go-i2p), which holds the data-packet
+// retransmission queue; this package does not track in-flight data packets and
+// therefore does not perform that retransmission. Callers that need it must
+// re-drive their retransmission queue against the (unchanged) old address.
+//
 // Parameters:
 //   - challengeData: The challenge data to fail
 //   - reason: Error describing why validation failed
@@ -583,6 +717,12 @@ func (pv *PathValidator) FailPath(challengeData []byte, reason error) {
 		}
 		// M-2 fix: delete terminal entry so it does not accumulate indefinitely.
 		delete(pv.challenges, key)
+
+		// Per the SSU2 spec (Connection Migration): on failed path validation,
+		// "Optionally, start a path validation on the old IP and port. If it
+		// fails, terminate the session." Release the congestion cap so the
+		// controller can resume normal operation on the old path.
+		pv.releaseValidation(challenge)
 	}
 }
 
@@ -649,6 +789,7 @@ func (pv *PathValidator) CleanupExpired() int {
 		// (e.g., due to a code path that predates the M-1/M-2 fixes).
 		if challenge.State == ChallengeValidated || challenge.State == ChallengeFailed {
 			delete(pv.challenges, id)
+			pv.releaseValidation(challenge)
 			cleaned++
 			continue
 		}
@@ -662,6 +803,7 @@ func (pv *PathValidator) CleanupExpired() int {
 				close(challenge.done)
 			}
 			delete(pv.challenges, id)
+			pv.releaseValidation(challenge)
 			cleaned++
 			continue
 		}

@@ -608,10 +608,18 @@ func (ptm *PeerTestManager) GetStats() map[string]int {
 //
 // Bob acts as relay between Alice (initiator) and Charlie (responder).
 //
+// Per the SSU2 spec (Peer Test, "IPv6 Notes"): "When Bob receives a request
+// from Alice via IPv4, Bob must select a Charlie that advertises an IPv4
+// address. When Bob receives a request from Alice via IPv6, Bob must select a
+// Charlie that advertises an IPv6 address." The caller is responsible for
+// selecting a Charlie whose advertised address is in the same IP family as
+// Alice's request; CreateRelayTest does not perform this selection.
+//
 // Parameters:
 //   - nonce: Test nonce from Alice
 //   - aliceAddr: Alice's address
-//   - charlieAddr: Charlie's address
+//   - charlieAddr: Charlie's address (must be in the same IP family as
+//     aliceAddr, per the spec)
 //
 // Returns nonce on success, error otherwise.
 func (ptm *PeerTestManager) CreateRelayTest(nonce uint32, aliceAddr, charlieAddr *net.UDPAddr) (uint32, error) {

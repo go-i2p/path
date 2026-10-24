@@ -294,6 +294,12 @@ func (b *PeerTestBlock) decodeSignedFields(rawData []byte, off int) (int, error)
 
 	b.Version = rawData[off]
 	off++
+	// Per the SSU2 spec, PeerTest ver is "1: SSU 1 (not supported), 2: SSU 2
+	// (required)". Cross-version peer testing is not supported, so reject any
+	// version other than 2.
+	if b.Version != 2 {
+		return off, oops.Errorf("PeerTest SSU version must be 2 (SSU 2 required), got %d", b.Version)
+	}
 	b.Nonce = binary.BigEndian.Uint32(rawData[off : off+4])
 	off += 4
 	b.Timestamp = binary.BigEndian.Uint32(rawData[off : off+4])

@@ -74,6 +74,20 @@ validator.SetCongestionController(congestionController)
 challengeData, err := validator.InitiatePathValidation(newAddr)
 ```
 
+Per the SSU2 spec, path validation is defined only for the data phase of a
+session — migration is not permitted during the handshake. If the connection
+passed to `NewPathValidator` implements the optional `HandshakePhase`
+interface (`InHandshake() bool`), `InitiatePathValidation` returns an error
+while a handshake is in progress.
+
+The spec also requires the congestion window to be reduced to the minimum
+while a path validation is in flight and restored only after the validation
+completes. If the congestion controller passed to `SetCongestionController`
+implements the optional `CongestionCapSetter` interface
+(`SetCongestionCap(cwnd int)` / `ClearCongestionCap()`), the validator sets
+the cap on the first in-flight validation and clears it when the last one
+completes.
+
 ### IntroducerRegistry
 
 Maintains up to three introducers (per I2P specification) for RouterInfo publication.
@@ -125,7 +139,7 @@ data, err = ssu2path.DecodePathResponse(block)
 - **Relay Management** — `RelayManager` allocates cryptographically random relay tags, tracks introducers with 1-hour expiry, and manages pending sessions across concurrent goroutines
 - **NAT Type Detection** — Classifies NAT as None, Full Cone, Restricted Cone, Port-Restricted Cone, or Symmetric based on probe results
 - **Seven-Message Peer Testing** — `PeerTestManager` drives the full SSU2 peer test protocol (Alice ↔ Bob ↔ Charlie) to measure external reachability
-- **Path Validation** — `PathValidator` safely migrates connections to new UDP paths using cryptographic challenge/response, with optional token cache invalidation and congestion window reset
+- **Path Validation** — `PathValidator` safely migrates connections to new UDP paths using cryptographic challenge/response, with optional token cache invalidation, congestion window reset, and congestion cap management. Migration is rejected during the handshake (per spec) when the connection implements `HandshakePhase`
 - **Introducer Registry** — Keeps up to 3 fresh introducers sorted by last-seen time for RouterInfo publication
 - **Wire Format Codecs** — Encode/decode for relay blocks (Types 7, 8, 9, 15, 16), peer test blocks (Type 10, messages 1–7), and path blocks (Types 18, 19)
 - **Thread Safety** — All public methods on all managers are safe for concurrent use
