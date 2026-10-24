@@ -345,17 +345,29 @@ func TestEncodeDecodeRelayTag(t *testing.T) {
 	assert.Equal(t, tag.RelayTag, decoded.RelayTag)
 }
 
-// TestEncodeRelayTag_ZeroTag tests that zero relay tag is currently accepted.
-// Note: Per SSU2 spec, relay tags should be nonzero, but this is not currently enforced.
+// TestEncodeRelayTag_ZeroTag tests that a zero relay tag is rejected.
+// Per SSU2 spec, the Relay Tag (blk 16) relaytag field is NONZERO
+// (itag range 1-(2^32-1)), so a zero tag is invalid.
 func TestEncodeRelayTag_ZeroTag(t *testing.T) {
 	tag := &RelayTagBlock{
 		RelayTag: 0,
 	}
 
-	// Currently accepts zero tag (spec says nonzero, but not enforced)
 	block, err := EncodeRelayTag(tag)
-	assert.NoError(t, err)
-	assert.NotNil(t, block)
+	assert.Error(t, err)
+	assert.Nil(t, block)
+	assert.Contains(t, err.Error(), "non-zero")
+}
+
+// TestDecodeRelayTag_ZeroTag tests that a zero relay tag is rejected on decode.
+func TestDecodeRelayTag_ZeroTag(t *testing.T) {
+	data := make([]byte, 4) // relaytag = 0
+	block := NewSSU2Block(BlockTypeRelayTag, data)
+
+	decoded, err := DecodeRelayTag(block)
+	assert.Error(t, err)
+	assert.Nil(t, decoded)
+	assert.Contains(t, err.Error(), "non-zero")
 }
 
 // TestDecodeRelayTag_InvalidSize tests decoder validation of tag size.

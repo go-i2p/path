@@ -14,8 +14,8 @@ import (
 
 // RelayResponseTokenTTL is the maximum lifetime for a relay response token.
 // Per SSU2 spec, "The token must be used immediately by Alice in the Session Request."
-// We enforce a 10-second window to allow for network latency while still
-// requiring near-immediate use.
+// The 10-second window is an implementation choice to allow for network latency
+// while still requiring near-immediate use; the spec does not mandate a specific value.
 const RelayResponseTokenTTL = 10 * time.Second
 
 // RelayManager manages relay connections and introducer services for NAT traversal.
@@ -307,8 +307,8 @@ func (rm *RelayManager) RemoveIntroducer(addr *net.UDPAddr) {
 //
 // Design rationale:
 // - Tags are cryptographically random 4-byte values
-// - Tags expire after 1 hour per I2P spec
-// - Zero tag is reserved and never allocated
+// - Tags expire after 1 hour (implementation choice; the spec does not mandate a specific expiry)
+// - Zero tag is reserved and never allocated (spec: relaytag is NONZERO)
 //
 // Parameters:
 //   - addr: UDP address to allocate tag for

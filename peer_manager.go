@@ -161,7 +161,8 @@ type PeerTest struct {
 	// StartTime is when the test was initiated
 	StartTime time.Time
 
-	// Deadline is when the overall test must complete (60 s per I2P spec).
+	// Deadline is when the overall test must complete (60 s, implementation
+	// choice; the spec does not mandate a specific peer-test timeout).
 	// M-04 fix: replaced Timeouts []time.Time (7 entries, only [0] ever set)
 	// with a single Deadline field to eliminate the misleading dead state.
 	Deadline time.Time
@@ -206,7 +207,8 @@ func (ptm *PeerTestManager) Stop() {
 
 // cleanupLoop periodically removes expired peer tests.
 // FIX-4.3: Reduced interval from 60s to 30s to decrease max latency from ~119s to ~89s.
-// Peer tests expire at 60s per I2P spec, so cleanup every 30s ensures max age ≈ 60 + 30 = 90s.
+// Peer tests expire at 60s (implementation choice; the spec does not mandate a
+// specific peer-test timeout), so cleanup every 30s ensures max age ≈ 60 + 30 = 90s.
 // This balances latency (reachability re-evaluation) against CPU cost.
 // Previous interval (60s) meant tests created just after a cleanup tick could live ~119s.
 func (ptm *PeerTestManager) cleanupLoop() {
@@ -226,7 +228,7 @@ func (ptm *PeerTestManager) cleanupLoop() {
 //
 // Design rationale:
 // - Generates cryptographically random nonce for test identification
-// - Creates test record with 60-second timeout per I2P spec
+// - Creates test record with 60-second timeout (implementation choice; the spec does not mandate a specific peer-test timeout)
 // - Returns nonce for tracking test progress
 //
 // Parameters:
@@ -306,7 +308,7 @@ func (ptm *PeerTestManager) InitiatePeerTest(bobAddr *net.UDPAddr) (uint32, erro
 		State:            TestRequested,
 		BobAddr:          bobAddr,
 		StartTime:        time.Now(),
-		Deadline:         time.Now().Add(60 * time.Second), // 60 s per I2P spec
+		Deadline:         time.Now().Add(60 * time.Second), // 60 s (implementation choice; not mandated by spec)
 	}
 
 	ptm.tests[nonce] = test

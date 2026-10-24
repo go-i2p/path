@@ -91,14 +91,14 @@ func TestPathValidator_InitiatePathValidation(t *testing.T) {
 	newAddr := &net.UDPAddr{IP: net.ParseIP("192.168.1.100"), Port: 8080}
 
 	// Initiate validation
-	challengeID, err := pv.InitiatePathValidation(newAddr)
+	challengeData, err := pv.InitiatePathValidation(newAddr)
 	require.NoError(t, err)
-	assert.NotEqual(t, uint64(0), challengeID)
+	assert.NotEmpty(t, challengeData)
 
 	// Verify challenge was recorded
-	challenge, exists := pv.GetChallenge(challengeID)
+	challenge, exists := pv.GetChallenge(challengeData)
 	require.True(t, exists)
-	assert.Equal(t, challengeID, challenge.ChallengeID)
+	assert.Equal(t, challengeData, challenge.ChallengeData)
 	assert.Equal(t, newAddr.String(), challenge.NewAddr.String())
 	assert.Equal(t, ChallengeSent, challenge.State)
 
@@ -115,9 +115,9 @@ func TestPathValidator_InitiatePathValidation_NilAddress(t *testing.T) {
 	conn := &mockPathValidationConn{}
 	pv := NewPathValidator(conn)
 
-	challengeID, err := pv.InitiatePathValidation(nil)
+	challengeData, err := pv.InitiatePathValidation(nil)
 	assert.Error(t, err)
-	assert.Equal(t, uint64(0), challengeID)
+	assert.Nil(t, challengeData)
 	assert.Contains(t, err.Error(), "new address is nil")
 }
 
@@ -130,12 +130,12 @@ func TestPathValidator_InitiatePathValidation_SendError(t *testing.T) {
 
 	newAddr := &net.UDPAddr{IP: net.ParseIP("192.168.1.100"), Port: 8080}
 
-	challengeID, err := pv.InitiatePathValidation(newAddr)
+	challengeData, err := pv.InitiatePathValidation(newAddr)
 	assert.Error(t, err)
-	assert.Equal(t, uint64(0), challengeID)
+	assert.Nil(t, challengeData)
 
 	// Challenge should be cleaned up on failure
-	_, exists := pv.GetChallenge(challengeID)
+	_, exists := pv.GetChallenge(challengeData)
 	assert.False(t, exists)
 }
 
@@ -145,8 +145,8 @@ func TestPathValidator_HandlePathChallenge(t *testing.T) {
 	pv := NewPathValidator(conn)
 
 	// Create a challenge block
-	challengeID := uint64(12345)
-	block := EncodePathChallenge(challengeID)
+	challengeData := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	block := EncodePathChallenge(challengeData)
 	fromAddr := &net.UDPAddr{IP: net.ParseIP("10.0.0.50"), Port: 9090}
 
 	// Handle the challenge
@@ -154,9 +154,9 @@ func TestPathValidator_HandlePathChallenge(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify challenge was recorded
-	challenge, exists := pv.GetChallenge(challengeID)
+	challenge, exists := pv.GetChallenge(challengeData)
 	require.True(t, exists)
-	assert.Equal(t, challengeID, challenge.ChallengeID)
+	assert.Equal(t, challengeData, challenge.ChallengeData)
 	assert.Equal(t, fromAddr.String(), challenge.NewAddr.String())
 	assert.Equal(t, ChallengeReceived, challenge.State)
 
@@ -184,8 +184,8 @@ func TestPathValidator_HandlePathChallenge_NilAddress(t *testing.T) {
 	conn := &mockPathValidationConn{}
 	pv := NewPathValidator(conn)
 
-	challengeID := uint64(12345)
-	block := EncodePathChallenge(challengeID)
+	challengeData := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	block := EncodePathChallenge(challengeData)
 
 	err := pv.HandlePathChallenge(block, nil)
 	assert.Error(t, err)
@@ -199,37 +199,37 @@ func TestPathValidator_HandlePathResponse(t *testing.T) {
 
 	// First, initiate a challenge
 	newAddr := &net.UDPAddr{IP: net.ParseIP("192.168.1.100"), Port: 8080}
-	challengeID, err := pv.InitiatePathValidation(newAddr)
+	challengeData, err := pv.InitiatePathValidation(newAddr)
 	require.NoError(t, err)
 
 	// Verify initial state
-	challenge, exists := pv.GetChallenge(challengeID)
+	challenge, exists := pv.GetChallenge(challengeData)
 	require.True(t, exists)
 	assert.Equal(t, ChallengeSent, challenge.State)
 
 	conn.resetCalls()
 
 	// Create and handle response
-	responseBlock := EncodePathResponse(challengeID)
+	responseBlock := EncodePathResponse(challengeData)
 	err = pv.HandlePathResponse(responseBlock, newAddr)
 	require.NoError(t, err)
 
 	// Verify challenge was validated and removed (completed)
-	_, exists = pv.GetChallenge(challengeID)
+	_, exists = pv.GetChallenge(challengeData)
 	assert.False(t, exists)
 
 	// Verify remote address was updated
 	assert.Equal(t, newAddr.String(), conn.GetRemoteAddr().String())
 }
 
-// TestPathValidator_HandlePathResponse_NoMatchingChallenge tests unknown challenge ID.
+// TestPathValidator_HandlePathResponse_NoMatchingChallenge tests unknown challenge data.
 func TestPathValidator_HandlePathResponse_NoMatchingChallenge(t *testing.T) {
 	conn := &mockPathValidationConn{}
 	pv := NewPathValidator(conn)
 
 	// Create response for non-existent challenge
-	challengeID := uint64(99999)
-	responseBlock := EncodePathResponse(challengeID)
+	challengeData := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+	responseBlock := EncodePathResponse(challengeData)
 	fromAddr := &net.UDPAddr{IP: net.ParseIP("192.168.1.100"), Port: 8080}
 
 	err := pv.HandlePathResponse(responseBlock, fromAddr)
@@ -244,18 +244,18 @@ func TestPathValidator_HandlePathResponse_WrongAddress(t *testing.T) {
 
 	// Initiate challenge to address A
 	addrA := &net.UDPAddr{IP: net.ParseIP("192.168.1.100"), Port: 8080}
-	challengeID, err := pv.InitiatePathValidation(addrA)
+	challengeData, err := pv.InitiatePathValidation(addrA)
 	require.NoError(t, err)
 
 	// Receive response from address B
 	addrB := &net.UDPAddr{IP: net.ParseIP("10.0.0.50"), Port: 9090}
-	responseBlock := EncodePathResponse(challengeID)
+	responseBlock := EncodePathResponse(challengeData)
 	err = pv.HandlePathResponse(responseBlock, addrB)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected address")
 
 	// Challenge should still exist
-	challenge, exists := pv.GetChallenge(challengeID)
+	challenge, exists := pv.GetChallenge(challengeData)
 	require.True(t, exists)
 	assert.Equal(t, ChallengeSent, challenge.State)
 }
@@ -276,8 +276,8 @@ func TestPathValidator_HandlePathResponse_NilAddress(t *testing.T) {
 	conn := &mockPathValidationConn{}
 	pv := NewPathValidator(conn)
 
-	challengeID := uint64(12345)
-	responseBlock := EncodePathResponse(challengeID)
+	challengeData := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	responseBlock := EncodePathResponse(challengeData)
 
 	err := pv.HandlePathResponse(responseBlock, nil)
 	assert.Error(t, err)
@@ -291,23 +291,23 @@ func TestPathValidator_ValidatePath(t *testing.T) {
 
 	// Create a validated challenge
 	newAddr := &net.UDPAddr{IP: net.ParseIP("192.168.1.100"), Port: 8080}
-	challengeID := uint64(54321)
-	pv.challenges[challengeID] = &PathChallenge{
-		ChallengeID: challengeID,
-		NewAddr:     newAddr,
-		Timestamp:   time.Now(),
-		State:       ChallengeValidated,
+	challengeData := []byte{0x05, 0x04, 0x03, 0x02, 0x01, 0x00, 0x09, 0x08}
+	pv.challenges[string(challengeData)] = &PathChallenge{
+		ChallengeData: challengeData,
+		NewAddr:       newAddr,
+		Timestamp:     time.Now(),
+		State:         ChallengeValidated,
 	}
 
 	// Validate the path
-	err := pv.ValidatePath(challengeID)
+	err := pv.ValidatePath(challengeData)
 	require.NoError(t, err)
 
 	// Verify remote address was updated
 	assert.Equal(t, newAddr.String(), conn.GetRemoteAddr().String())
 
 	// Challenge should be cleaned up
-	_, exists := pv.GetChallenge(challengeID)
+	_, exists := pv.GetChallenge(challengeData)
 	assert.False(t, exists)
 }
 
@@ -318,16 +318,16 @@ func TestPathValidator_ValidatePath_NotValidated(t *testing.T) {
 
 	// Create a challenge that's not yet validated
 	newAddr := &net.UDPAddr{IP: net.ParseIP("192.168.1.100"), Port: 8080}
-	challengeID := uint64(54321)
-	pv.challenges[challengeID] = &PathChallenge{
-		ChallengeID: challengeID,
-		NewAddr:     newAddr,
-		Timestamp:   time.Now(),
-		State:       ChallengeSent,
+	challengeData := []byte{0x05, 0x04, 0x03, 0x02, 0x01, 0x00, 0x09, 0x08}
+	pv.challenges[string(challengeData)] = &PathChallenge{
+		ChallengeData: challengeData,
+		NewAddr:       newAddr,
+		Timestamp:     time.Now(),
+		State:         ChallengeSent,
 	}
 
 	// Try to validate
-	err := pv.ValidatePath(challengeID)
+	err := pv.ValidatePath(challengeData)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not validated")
 }
@@ -337,7 +337,7 @@ func TestPathValidator_ValidatePath_NonExistent(t *testing.T) {
 	conn := &mockPathValidationConn{}
 	pv := NewPathValidator(conn)
 
-	err := pv.ValidatePath(99999)
+	err := pv.ValidatePath([]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no challenge found")
 }
@@ -351,22 +351,22 @@ func TestPathValidator_ValidatePath_SetAddrError(t *testing.T) {
 
 	// Create a validated challenge
 	newAddr := &net.UDPAddr{IP: net.ParseIP("192.168.1.100"), Port: 8080}
-	challengeID := uint64(54321)
-	pv.challenges[challengeID] = &PathChallenge{
-		ChallengeID: challengeID,
-		NewAddr:     newAddr,
-		Timestamp:   time.Now(),
-		State:       ChallengeValidated,
+	challengeData := []byte{0x05, 0x04, 0x03, 0x02, 0x01, 0x00, 0x09, 0x08}
+	pv.challenges[string(challengeData)] = &PathChallenge{
+		ChallengeData: challengeData,
+		NewAddr:       newAddr,
+		Timestamp:     time.Now(),
+		State:         ChallengeValidated,
 	}
 
 	// Try to validate
-	err := pv.ValidatePath(challengeID)
+	err := pv.ValidatePath(challengeData)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to set remote address")
 
 	// BUG-002 fix: Challenge is deleted before side effects to prevent TOCTOU race
 	// When SetRemoteAddr fails, challenge is already gone (not marked as failed)
-	_, exists := pv.GetChallenge(challengeID)
+	_, exists := pv.GetChallenge(challengeData)
 	require.False(t, exists)
 }
 
@@ -376,20 +376,20 @@ func TestPathValidator_FailPath(t *testing.T) {
 	pv := NewPathValidator(conn)
 
 	// Create a challenge
-	challengeID := uint64(11111)
-	pv.challenges[challengeID] = &PathChallenge{
-		ChallengeID: challengeID,
-		NewAddr:     &net.UDPAddr{IP: net.ParseIP("192.168.1.100"), Port: 8080},
-		Timestamp:   time.Now(),
-		State:       ChallengeSent,
+	challengeData := []byte{0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11}
+	pv.challenges[string(challengeData)] = &PathChallenge{
+		ChallengeData: challengeData,
+		NewAddr:       &net.UDPAddr{IP: net.ParseIP("192.168.1.100"), Port: 8080},
+		Timestamp:     time.Now(),
+		State:         ChallengeSent,
 	}
 
 	// Fail the path
-	pv.FailPath(challengeID, assert.AnError)
+	pv.FailPath(challengeData, assert.AnError)
 
 	// M-2 fix: FailPath now deletes the entry to prevent memory leaks.
 	// The challenge should no longer exist after being failed.
-	_, exists := pv.GetChallenge(challengeID)
+	_, exists := pv.GetChallenge(challengeData)
 	require.False(t, exists)
 }
 
@@ -399,7 +399,7 @@ func TestPathValidator_FailPath_NonExistent(t *testing.T) {
 	pv := NewPathValidator(conn)
 
 	// Should not panic
-	pv.FailPath(99999, assert.AnError)
+	pv.FailPath([]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, assert.AnError)
 }
 
 // TestPathValidator_GetChallenge tests retrieving challenge info.
@@ -408,25 +408,25 @@ func TestPathValidator_GetChallenge(t *testing.T) {
 	pv := NewPathValidator(conn)
 
 	// Create a challenge
-	challengeID := uint64(22222)
+	challengeData := []byte{0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22}
 	originalAddr := &net.UDPAddr{IP: net.ParseIP("192.168.1.100"), Port: 8080}
-	pv.challenges[challengeID] = &PathChallenge{
-		ChallengeID: challengeID,
-		NewAddr:     originalAddr,
-		Timestamp:   time.Now(),
-		State:       ChallengeSent,
+	pv.challenges[string(challengeData)] = &PathChallenge{
+		ChallengeData: challengeData,
+		NewAddr:       originalAddr,
+		Timestamp:     time.Now(),
+		State:         ChallengeSent,
 	}
 
 	// Get challenge
-	challenge, exists := pv.GetChallenge(challengeID)
+	challenge, exists := pv.GetChallenge(challengeData)
 	require.True(t, exists)
-	assert.Equal(t, challengeID, challenge.ChallengeID)
+	assert.Equal(t, challengeData, challenge.ChallengeData)
 	assert.Equal(t, originalAddr.String(), challenge.NewAddr.String())
 	assert.Equal(t, ChallengeSent, challenge.State)
 
 	// Verify it's a defensive copy (mutation doesn't affect original)
 	challenge.State = ChallengeFailed
-	originalChallenge, _ := pv.GetChallenge(challengeID)
+	originalChallenge, _ := pv.GetChallenge(challengeData)
 	assert.Equal(t, ChallengeSent, originalChallenge.State)
 }
 
@@ -435,7 +435,7 @@ func TestPathValidator_GetChallenge_NonExistent(t *testing.T) {
 	conn := &mockPathValidationConn{}
 	pv := NewPathValidator(conn)
 
-	challenge, exists := pv.GetChallenge(99999)
+	challenge, exists := pv.GetChallenge([]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF})
 	assert.False(t, exists)
 	assert.Nil(t, challenge)
 }
@@ -448,39 +448,41 @@ func TestPathValidator_CleanupExpired(t *testing.T) {
 	now := time.Now()
 
 	// Add expired challenge (older than timeout)
-	expiredID := uint64(1)
-	pv.challenges[expiredID] = &PathChallenge{
-		ChallengeID: expiredID,
-		NewAddr:     &net.UDPAddr{IP: net.ParseIP("192.168.1.1"), Port: 8080},
-		Timestamp:   now.Add(-PathValidationTimeout - time.Second),
-		State:       ChallengeSent,
+	expiredData := []byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	pv.challenges[string(expiredData)] = &PathChallenge{
+		ChallengeData: expiredData,
+		NewAddr:       &net.UDPAddr{IP: net.ParseIP("192.168.1.1"), Port: 8080},
+		Timestamp:     now.Add(-PathValidationTimeout - time.Second),
+		State:         ChallengeSent,
 	}
 
-	// Add recent challenge (within timeout)
-	recentID := uint64(2)
-	pv.challenges[recentID] = &PathChallenge{
-		ChallengeID: recentID,
-		NewAddr:     &net.UDPAddr{IP: net.ParseIP("192.168.1.2"), Port: 8080},
-		Timestamp:   now.Add(-time.Second),
-		State:       ChallengeSent,
+	// Add recent challenge (within timeout, Path Response timer not yet expired)
+	recentData := []byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	pv.challenges[string(recentData)] = &PathChallenge{
+		ChallengeData: recentData,
+		NewAddr:       &net.UDPAddr{IP: net.ParseIP("192.168.1.2"), Port: 8080},
+		Timestamp:     now.Add(-time.Second),
+		LastSentAt:    now.Add(-time.Second),
+		ResponseTimer: PathResponseBaseTimer,
+		State:         ChallengeSent,
 	}
 
 	// Add validated challenge (should not be cleaned)
-	validatedID := uint64(3)
-	pv.challenges[validatedID] = &PathChallenge{
-		ChallengeID: validatedID,
-		NewAddr:     &net.UDPAddr{IP: net.ParseIP("192.168.1.3"), Port: 8080},
-		Timestamp:   now.Add(-PathValidationTimeout - time.Second),
-		State:       ChallengeValidated,
+	validatedData := []byte{0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	pv.challenges[string(validatedData)] = &PathChallenge{
+		ChallengeData: validatedData,
+		NewAddr:       &net.UDPAddr{IP: net.ParseIP("192.168.1.3"), Port: 8080},
+		Timestamp:     now.Add(-PathValidationTimeout - time.Second),
+		State:         ChallengeValidated,
 	}
 
 	// Add failed challenge (should not be cleaned)
-	failedID := uint64(4)
-	pv.challenges[failedID] = &PathChallenge{
-		ChallengeID: failedID,
-		NewAddr:     &net.UDPAddr{IP: net.ParseIP("192.168.1.4"), Port: 8080},
-		Timestamp:   now.Add(-PathValidationTimeout - time.Second),
-		State:       ChallengeFailed,
+	failedData := []byte{0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	pv.challenges[string(failedData)] = &PathChallenge{
+		ChallengeData: failedData,
+		NewAddr:       &net.UDPAddr{IP: net.ParseIP("192.168.1.4"), Port: 8080},
+		Timestamp:     now.Add(-PathValidationTimeout - time.Second),
+		State:         ChallengeFailed,
 	}
 
 	// Run cleanup
@@ -490,18 +492,57 @@ func TestPathValidator_CleanupExpired(t *testing.T) {
 	assert.Equal(t, 3, cleaned)
 
 	// Verify expired challenge was removed
-	_, exists := pv.GetChallenge(expiredID)
+	_, exists := pv.GetChallenge(expiredData)
 	assert.False(t, exists)
 
 	// Verify recent challenge still exists
-	_, exists = pv.GetChallenge(recentID)
+	_, exists = pv.GetChallenge(recentData)
 	assert.True(t, exists)
 
 	// Terminal-state challenges are also removed by CleanupExpired (M-1/M-2 safety net).
-	_, exists = pv.GetChallenge(validatedID)
+	_, exists = pv.GetChallenge(validatedData)
 	assert.False(t, exists)
-	_, exists = pv.GetChallenge(failedID)
+	_, exists = pv.GetChallenge(failedData)
 	assert.False(t, exists)
+}
+
+// TestPathValidator_CleanupExpired_Resend tests that a challenge whose Path
+// Response timer expired (but whose Path Validation timer has not) is resent
+// and its timer doubled, per the SSU2 spec.
+func TestPathValidator_CleanupExpired_Resend(t *testing.T) {
+	conn := &mockPathValidationConn{}
+	pv := NewPathValidator(conn)
+
+	now := time.Now()
+	addr := &net.UDPAddr{IP: net.ParseIP("192.168.1.5"), Port: 8080}
+
+	// Challenge sent 3s ago: Path Response timer (2s) expired, but Path
+	// Validation timer (10s) has not.
+	data := []byte{0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	pv.challenges[string(data)] = &PathChallenge{
+		ChallengeData: data,
+		NewAddr:       addr,
+		Timestamp:     now.Add(-3 * time.Second),
+		LastSentAt:    now.Add(-3 * time.Second),
+		ResponseTimer: PathResponseBaseTimer,
+		State:         ChallengeSent,
+	}
+
+	cleaned := pv.CleanupExpired()
+
+	// Not removed (validation timer not expired)
+	assert.Equal(t, 0, cleaned)
+
+	// Challenge still exists, timer doubled, LastSentAt updated
+	ch, exists := pv.GetChallenge(data)
+	assert.True(t, exists)
+	assert.Equal(t, PathResponseBaseTimer*2, ch.ResponseTimer)
+	assert.WithinDuration(t, now, ch.LastSentAt, 2*time.Second)
+
+	// A Path Challenge was resent to the new address
+	assert.Equal(t, 1, len(conn.sentBlocks))
+	assert.Equal(t, uint8(BlockTypePathChallenge), conn.sentBlocks[0].Type)
+	assert.Equal(t, addr, conn.sentAddrs[0])
 }
 
 // TestPathValidator_CleanupExpired_Empty tests cleanup with no challenges.
@@ -515,10 +556,10 @@ func TestPathValidator_CleanupExpired_Empty(t *testing.T) {
 
 // TestEncodeDecodePathChallenge tests Path Challenge encoding/decoding.
 func TestEncodeDecodePathChallenge(t *testing.T) {
-	challengeID := uint64(0x0123456789ABCDEF)
+	challengeData := []byte{0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF}
 
 	// Encode
-	block := EncodePathChallenge(challengeID)
+	block := EncodePathChallenge(challengeData)
 	require.NotNil(t, block)
 	assert.Equal(t, BlockTypePathChallenge, block.Type)
 	assert.Equal(t, 8, len(block.Data))
@@ -526,7 +567,7 @@ func TestEncodeDecodePathChallenge(t *testing.T) {
 	// Decode
 	decoded, err := DecodePathChallenge(block)
 	require.NoError(t, err)
-	assert.Equal(t, challengeID, decoded)
+	assert.Equal(t, challengeData, decoded)
 }
 
 // TestDecodePathChallenge_NilBlock tests nil block handling.
@@ -548,24 +589,12 @@ func TestDecodePathChallenge_WrongType(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid block type")
 }
 
-// TestDecodePathChallenge_TooShort tests short data handling.
-func TestDecodePathChallenge_TooShort(t *testing.T) {
-	block := &SSU2Block{
-		Type: BlockTypePathChallenge,
-		Data: make([]byte, 7), // Too short
-	}
-
-	_, err := DecodePathChallenge(block)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "too short")
-}
-
 // TestEncodeDecodePathResponse tests Path Response encoding/decoding.
 func TestEncodeDecodePathResponse(t *testing.T) {
-	challengeID := uint64(0xFEDCBA9876543210)
+	challengeData := []byte{0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10}
 
 	// Encode
-	block := EncodePathResponse(challengeID)
+	block := EncodePathResponse(challengeData)
 	require.NotNil(t, block)
 	assert.Equal(t, BlockTypePathResponse, block.Type)
 	assert.Equal(t, 8, len(block.Data))
@@ -573,7 +602,7 @@ func TestEncodeDecodePathResponse(t *testing.T) {
 	// Decode
 	decoded, err := DecodePathResponse(block)
 	require.NoError(t, err)
-	assert.Equal(t, challengeID, decoded)
+	assert.Equal(t, challengeData, decoded)
 }
 
 // TestDecodePathResponse_NilBlock tests nil block handling.
@@ -593,18 +622,6 @@ func TestDecodePathResponse_WrongType(t *testing.T) {
 	_, err := DecodePathResponse(block)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid block type")
-}
-
-// TestDecodePathResponse_TooShort tests short data handling.
-func TestDecodePathResponse_TooShort(t *testing.T) {
-	block := &SSU2Block{
-		Type: BlockTypePathResponse,
-		Data: make([]byte, 7), // Too short
-	}
-
-	_, err := DecodePathResponse(block)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "too short")
 }
 
 // TestPathChallengeState_String tests string representation.
@@ -650,6 +667,50 @@ func TestPathValidator_ConcurrentOperations(t *testing.T) {
 }
 
 // TestPathValidator_CompleteFlow tests end-to-end validation flow.
+// mockCongestionController records SetCWND calls for testing.
+type mockCongestionController struct {
+	mutex    sync.Mutex
+	cwnd     int
+	resetCnt int
+}
+
+func (m *mockCongestionController) Reset() {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.resetCnt++
+}
+
+func (m *mockCongestionController) SetCWND(cwnd int) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.cwnd = cwnd
+}
+
+func (m *mockCongestionController) getCWND() int {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	return m.cwnd
+}
+
+// TestPathValidator_ReduceCongestionForValidation verifies that entering the
+// path validation phase reduces the congestion window to the minimum (1280),
+// as required by the SSU2 spec (Connection Migration).
+func TestPathValidator_ReduceCongestionForValidation(t *testing.T) {
+	mockConn := &mockPathValidationConn{}
+	pv := NewPathValidator(mockConn)
+	defer pv.Stop()
+
+	cc := &mockCongestionController{cwnd: 100000}
+	pv.SetCongestionController(cc)
+
+	newAddr := &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: 12345}
+	_, err := pv.InitiatePathValidation(newAddr)
+	assert.NoError(t, err)
+
+	// The congestion window must be reduced to the minimum (MinMTU = 1280).
+	assert.Equal(t, MinMTU, cc.getCWND())
+}
+
 func TestPathValidator_CompleteFlow(t *testing.T) {
 	conn := &mockPathValidationConn{}
 	pv := NewPathValidator(conn)
@@ -657,16 +718,16 @@ func TestPathValidator_CompleteFlow(t *testing.T) {
 	newAddr := &net.UDPAddr{IP: net.ParseIP("192.168.1.100"), Port: 8080}
 
 	// Step 1: Initiate validation
-	challengeID, err := pv.InitiatePathValidation(newAddr)
+	challengeData, err := pv.InitiatePathValidation(newAddr)
 	require.NoError(t, err)
 
 	// Verify challenge sent
-	challenge, exists := pv.GetChallenge(challengeID)
+	challenge, exists := pv.GetChallenge(challengeData)
 	require.True(t, exists)
 	assert.Equal(t, ChallengeSent, challenge.State)
 
 	// Step 2: Simulate receiving response
-	responseBlock := EncodePathResponse(challengeID)
+	responseBlock := EncodePathResponse(challengeData)
 	err = pv.HandlePathResponse(responseBlock, newAddr)
 	require.NoError(t, err)
 
@@ -674,22 +735,22 @@ func TestPathValidator_CompleteFlow(t *testing.T) {
 	assert.Equal(t, newAddr.String(), conn.GetRemoteAddr().String())
 
 	// Challenge should be cleaned up
-	_, exists = pv.GetChallenge(challengeID)
+	_, exists = pv.GetChallenge(challengeData)
 	assert.False(t, exists)
 }
 
-// TestGenerateChallengeID tests challenge ID generation.
-func TestGenerateChallengeID(t *testing.T) {
-	// Generate multiple IDs
-	ids := make(map[uint64]bool)
+// TestGenerateChallengeData tests challenge data generation.
+func TestGenerateChallengeData(t *testing.T) {
+	// Generate multiple data values
+	ids := make(map[string]bool)
 	for i := 0; i < 100; i++ {
-		id, err := generateChallengeID()
+		id, err := generateChallengeData()
 		require.NoError(t, err)
-		assert.NotEqual(t, uint64(0), id)
+		assert.NotEmpty(t, id)
 
 		// Should be unique
-		assert.False(t, ids[id], "duplicate challenge ID generated")
-		ids[id] = true
+		assert.False(t, ids[string(id)], "duplicate challenge data generated")
+		ids[string(id)] = true
 	}
 }
 
@@ -724,7 +785,7 @@ func TestRunPMTUD_H1Fix(t *testing.T) {
 
 			for i, b := range blocks {
 				if b.Type == BlockTypePathChallenge {
-					resp := EncodePathResponse(func() uint64 {
+					resp := EncodePathResponse(func() []byte {
 						id, _ := DecodePathChallenge(b)
 						return id
 					}())
@@ -751,10 +812,10 @@ func TestHandlePathResponse_H2Fix(t *testing.T) {
 	defer pv.Stop()
 
 	addr := &net.UDPAddr{IP: net.ParseIP("198.51.100.1"), Port: 9000}
-	challengeID, err := pv.InitiatePathValidation(addr)
+	challengeData, err := pv.InitiatePathValidation(addr)
 	require.NoError(t, err)
 
-	responseBlock := EncodePathResponse(challengeID)
+	responseBlock := EncodePathResponse(challengeData)
 
 	const goroutines = 10
 	errs := make(chan error, goroutines)

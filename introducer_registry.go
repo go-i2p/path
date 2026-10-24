@@ -40,8 +40,7 @@ type RegisteredIntroducer struct {
 
 	// StaticKey is the introducer's static public key for RouterInfo publication.
 	// This is the 44-byte base64-encoded form (encoding 32 raw bytes) as required
-	// by the RouterInfo address format. Other key fields in this package (e.g.,
-	// IntroKeySize in key_rotation.go) use raw 32-byte slices (M-5).
+	// by the RouterInfo address format.
 	StaticKey []byte
 
 	// IntroKey is the introducer's introduction key for RouterInfo publication.

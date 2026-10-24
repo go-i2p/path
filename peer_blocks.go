@@ -228,10 +228,22 @@ func DecodePeerTestBlock(ssu2Block *SSU2Block) (*PeerTestBlock, error) {
 		return nil, err
 	}
 
-	// Remaining bytes are signature (optional for messages 5-7)
-	if off < len(rawData) {
-		block.Signature = make([]byte, len(rawData)-off)
-		copy(block.Signature, rawData[off:])
+	// Signature: 64 bytes for Ed25519 (per SSU2 spec). "Only present for
+	// messages 1-4. Optional in message 5-7." So it is mandatory for
+	// messages 1-4 and optional (but must be 64 bytes) for 5-7.
+	sigLen := len(rawData) - off
+	if block.MessageCode <= 4 {
+		if sigLen != 64 {
+			return nil, oops.Errorf("PeerTest message %d requires a 64-byte signature, got %d bytes", block.MessageCode, sigLen)
+		}
+		block.Signature = make([]byte, 64)
+		copy(block.Signature, rawData[off:off+64])
+	} else if sigLen > 0 {
+		if sigLen != 64 {
+			return nil, oops.Errorf("PeerTest message %d signature must be 64 bytes if present, got %d", block.MessageCode, sigLen)
+		}
+		block.Signature = make([]byte, 64)
+		copy(block.Signature, rawData[off:off+64])
 	}
 
 	return block, nil

@@ -727,24 +727,25 @@ func TestHolePunchCoordinator_HandleHolePunch_WithSignatureVerification(t *testi
 	sessionID, err := hpc.InitiateHolePunch(remoteAddr, introducerAddr, relayTag)
 	require.NoError(t, err)
 
-	// Build a properly signed RelayIntro block matching the resolver's context.
+	// Build a properly signed Relay Response block matching the resolver's
+	// context. Per SSU2 spec §Hole Punch, the Hole Punch carries the identical
+	// signed Relay Response block; the signer is Charlie (the remote target)
+	// and the signed data includes the introducer's (Bob's) router hash.
 	nonce := uint32(0x11223344)
 	timestamp := uint32(time.Now().Unix())
-	aliceIP := net.ParseIP("203.0.113.4")
-	alicePort := uint16(9999)
-	sig, err := SignRelayRequest(testAlicePriv, testBobHash, testCharlieHash,
-		nonce, relayTag, timestamp, 2, alicePort, aliceIP) // 2 = SSU2 version byte
+	charlieIP := net.ParseIP("203.0.113.4")
+	charliePort := uint16(9999)
+	sig, err := SignRelayResponse(testAlicePriv, testBobHash,
+		nonce, timestamp, 2, charliePort, charlieIP) // 2 = SSU2 version byte
 	require.NoError(t, err)
 
-	block := &RelayIntroBlock{
-		AliceRouterHash: make([]byte, 32),
-		Nonce:           nonce,
-		AliceRelayTag:   relayTag,
-		Timestamp:       timestamp,
-		Version:         2, // SSU2 version byte
-		AlicePort:       alicePort,
-		AliceIP:         aliceIP,
-		Signature:       sig,
+	block := &RelayResponseBlock{
+		Nonce:       nonce,
+		Timestamp:   timestamp,
+		Version:     2, // SSU2 version byte
+		CharliePort: charliePort,
+		CharlieIP:   charlieIP,
+		Signature:   sig,
 	}
 	fromAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.3"), Port: 8889}
 	err = hpc.HandleHolePunch(sessionID, fromAddr, block)
@@ -773,10 +774,9 @@ func TestHolePunchCoordinator_HandleHolePunch_SignatureVerificationFails(t *test
 	sessionID, err := hpc.InitiateHolePunch(remoteAddr, introducerAddr, relayTag)
 	require.NoError(t, err)
 
-	block := &RelayIntroBlock{
-		AliceRouterHash: make([]byte, 32),
-		Nonce:           relayTag,
-		Signature:       make([]byte, 64),
+	block := &RelayResponseBlock{
+		Nonce:     relayTag,
+		Signature: make([]byte, 64),
 	}
 	fromAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.3"), Port: 8889}
 	err = hpc.HandleHolePunch(sessionID, fromAddr, block)
@@ -795,15 +795,13 @@ func TestHolePunchCoordinator_HandleHolePunch_BadSignatureRejected(t *testing.T)
 	require.NoError(t, err)
 
 	// Block with garbage signature must be rejected.
-	block := &RelayIntroBlock{
-		AliceRouterHash: make([]byte, 32),
-		Nonce:           relayTag,
-		AliceRelayTag:   relayTag,
-		Timestamp:       uint32(time.Now().Unix()),
-		Version:         2, // SSU2 version byte
-		AlicePort:       9999,
-		AliceIP:         net.ParseIP("203.0.113.4"),
-		Signature:       make([]byte, 64),
+	block := &RelayResponseBlock{
+		Nonce:       relayTag,
+		Timestamp:   uint32(time.Now().Unix()),
+		Version:     2, // SSU2 version byte
+		CharliePort: 9999,
+		CharlieIP:   net.ParseIP("203.0.113.4"),
+		Signature:   make([]byte, 64),
 	}
 	fromAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.3"), Port: 8889}
 	err = hpc.HandleHolePunch(sessionID, fromAddr, block)

@@ -53,14 +53,18 @@ type HolePunchVerifyInfo struct {
 	// IntroducerAddr is the attempt's introducer address (Bob).
 	IntroducerAddr *net.UDPAddr
 
-	// Block is the decoded RelayIntro-format block being verified.
-	Block *RelayIntroBlock
+	// Block is the decoded Relay Response block being verified. Per SSU2 spec
+	// §Hole Punch, the Hole Punch message carries the identical signed Relay
+	// Response block (Type 8) that Bob forwards to Alice.
+	Block *RelayResponseBlock
 }
 
 // HolePunchContextResolver resolves the verification context for an incoming
 // hole-punch message. The implementation maps the attempt's peer addresses to
-// router identities and resolves the signer's Ed25519 public key (typically
-// via a NetDB lookup of Block.AliceRouterHash).
+// router identities and resolves the signer's Ed25519 public key. Per SSU2
+// spec §Hole Punch, the Hole Punch carries the identical signed Relay Response
+// block, so the signer is Charlie (the remote target) and the signed data
+// includes the introducer's (Bob's) router hash.
 //
 // ok=false MUST cause the message to be rejected (fail-closed). Returning
 // ok=true with a nil signerKey is a programming error and also causes
@@ -71,16 +75,18 @@ type HolePunchContextResolver func(info HolePunchVerifyInfo) (
 // HolePunchCoordinator coordinates UDP hole punching for NAT traversal.
 // It manages hole punch attempts with state tracking, retries, and timeout handling.
 //
-// The HolePunch message (type 11) uses the same wire format as RelayIntro:
-//
-//	[Flag:1][SenderHash:32][Nonce:4][RelayTag:4][Timestamp:4][Ver:1][Asz:1][Port:2][IP:asz-2]
-//
-// See RelayIntroBlock in relay_blocks.go for the encoder/decoder.
+// The HolePunch message (type 11) carries, in its Noise payload, a Relay
+// Response block (Type 8) that is identical to the one Bob forwards to Alice.
+// Per SSU2 spec §Hole Punch, the signature verification of the Hole Punch
+// includes the introducer's (Bob's) router hash, and the signer is Charlie
+// (the remote target). See RelayResponseBlock in relay_blocks.go for the
+// encoder/decoder and VerifyRelayResponseSignature in relay_signature.go.
 //
 // Design rationale:
 // - Session IDs are cryptographically random 64-bit values for security
 // - Maximum 3 retry attempts per I2P convention
-// - 30-second timeout per attempt (I2P spec recommendation)
+// - 30-second timeout per attempt (implementation choice; the spec does not
+//   mandate a specific Hole Punch timeout)
 // - State machine: Requested → Sent → Waiting → Success/Failed
 // - Signature verification is MANDATORY per SSU2 spec and must be provided at construction
 //
@@ -230,7 +236,7 @@ func (hpc *HolePunchCoordinator) cleanupLoop() {
 // - Uses introducer to coordinate hole punch with target peer
 // - Generates cryptographically random session ID
 // - Registers pending session with RelayManager
-// - 30-second timeout per I2P spec
+// - 30-second timeout (implementation choice; the spec does not mandate a specific Hole Punch timeout)
 //
 // Parameters:
 //   - remoteAddr: Target peer's UDP address
@@ -401,14 +407,15 @@ func (hpc *HolePunchCoordinator) SendHolePunch(sessionID uint64, targetAddr *net
 // context resolver. Per SSU2 spec §Hole Punch, signatures are mandatory.
 // The resolver is guaranteed to be non-nil (checked at construction).
 //
-// The resolver maps the attempt's peer addresses to router identities
-// (Bob = introducer, Charlie = remote target) and returns the signer's
-// Ed25519 public key. If the resolver returns ok=false, the message is
-// rejected (fail-closed). The resolved context is then used to reconstruct
-// the signed payload and verify the signature.
+// The Hole Punch carries the identical signed Relay Response block that Bob
+// forwards to Alice. The resolver maps the attempt's peer addresses to router
+// identities (Bob = introducer, Charlie = remote target) and returns the
+// signer's Ed25519 public key (Charlie's). If the resolver returns ok=false,
+// the message is rejected (fail-closed). The resolved context is then used to
+// reconstruct the signed payload and verify the signature.
 //
 // Must be called with hpc.mutex held (the attempt is read by the caller).
-func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, fromAddr *net.UDPAddr, attempt *HolePunchAttempt, block *RelayIntroBlock) error {
+func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, fromAddr *net.UDPAddr, attempt *HolePunchAttempt, block *RelayResponseBlock) error {
 	if block == nil {
 		log.WithFields(logger.Fields{
 			"pkg":        "ssu2",
@@ -441,17 +448,19 @@ func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, from
 			Errorf("failed to resolve verification context for hole punch - rejecting (fail-closed)")
 	}
 
-	valid, err := VerifyRelayRequestSignature(
+	// Per SSU2 spec §Hole Punch, the Hole Punch carries the identical signed
+	// Relay Response block that Bob forwards to Alice. The signature is made
+	// by Charlie (the remote target) over the Relay Response signed data,
+	// which includes the introducer's (Bob's) router hash.
+	valid, err := VerifyRelayResponseSignature(
 		signerKey,
 		block.Signature,
 		ctx.BobHash,
-		ctx.CharlieHash,
 		block.Nonce,
-		block.AliceRelayTag,
 		block.Timestamp,
 		block.Version,
-		block.AlicePort,
-		block.AliceIP,
+		block.CharliePort,
+		block.CharlieIP,
 	)
 	if err != nil {
 		return oops.
@@ -480,11 +489,12 @@ func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, from
 // Parameters:
 //   - sessionID: Session identifier from the packet
 //   - fromAddr: Address the packet came from
-//   - block: The decoded RelayIntro-format block (MUST NOT be nil)
+//   - block: The decoded Relay Response block carried in the Hole Punch
+//     (MUST NOT be nil)
 //
 // Returns error if session not found, block is nil, or signature verification fails.
 // BUG-M03 fix: Clarified that block parameter cannot be nil.
-func (hpc *HolePunchCoordinator) HandleHolePunch(sessionID uint64, fromAddr *net.UDPAddr, block *RelayIntroBlock) error {
+func (hpc *HolePunchCoordinator) HandleHolePunch(sessionID uint64, fromAddr *net.UDPAddr, block *RelayResponseBlock) error {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "HandleHolePunch", "sessionID": sessionID}).Debug("Handling hole punch")
 	hpc.mutex.Lock()
 	defer hpc.mutex.Unlock()
@@ -496,6 +506,21 @@ func (hpc *HolePunchCoordinator) HandleHolePunch(sessionID uint64, fromAddr *net
 
 	if err := hpc.verifyHolePunchSignature(sessionID, fromAddr, attempt, block); err != nil {
 		return err
+	}
+
+	// Per SSU2 spec §Hole Punch: "If Charlie is behind a symmetric NAT, his
+	// reported port in the Relay Response and Hole Punch may not be accurate.
+	// Therefore, Alice should check the UDP source port of the Hole Punch
+	// message, and use that if it is different than the reported port."
+	// The UDP source address (fromAddr) is authoritative; if it differs from
+	// the port reported in the block, update the remote address to use the
+	// source port so subsequent connections target the correct endpoint.
+	if block.CharliePort != 0 && block.CharliePort != uint16(fromAddr.Port) {
+		log.WithFields(logger.Fields{
+			"pkg": "ssu2", "func": "HandleHolePunch", "sessionID": sessionID,
+			"reported_port": block.CharliePort, "source_port": fromAddr.Port,
+		}).Info("Hole Punch UDP source port differs from reported port; using source port (symmetric NAT)")
+		attempt.RemoteAddr = &net.UDPAddr{IP: fromAddr.IP, Port: fromAddr.Port}
 	}
 
 	attempt.State = HolePunchWaiting
@@ -511,11 +536,12 @@ func (hpc *HolePunchCoordinator) HandleHolePunch(sessionID uint64, fromAddr *net
 // Parameters:
 //   - sessionID: Session identifier
 //   - addr: Address that responded
-//   - block: The decoded RelayIntro-format block (MUST NOT be nil)
+//   - block: The decoded Relay Response block carried in the Hole Punch
+//     (MUST NOT be nil)
 //
 // Returns error if session not found, block is nil, or signature verification fails.
 // BUG-M03 fix: Clarified that block parameter cannot be nil.
-func (hpc *HolePunchCoordinator) ProcessHolePunchResponse(sessionID uint64, addr *net.UDPAddr, block *RelayIntroBlock) error {
+func (hpc *HolePunchCoordinator) ProcessHolePunchResponse(sessionID uint64, addr *net.UDPAddr, block *RelayResponseBlock) error {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "ProcessHolePunchResponse", "sessionID": sessionID}).Debug("Processing hole punch response")
 	hpc.mutex.Lock()
 	defer hpc.mutex.Unlock()
@@ -538,6 +564,21 @@ func (hpc *HolePunchCoordinator) ProcessHolePunchResponse(sessionID uint64, addr
 			With("expected", attempt.RemoteAddr.String()).
 			With("actual", addr.String()).
 			Errorf("response address does not match expected remote")
+	}
+
+	// Per SSU2 spec §Hole Punch: "If Charlie is behind a symmetric NAT, his
+	// reported port in the Relay Response and Hole Punch may not be accurate.
+	// Therefore, Alice should check the UDP source port of the Hole Punch
+	// message, and use that if it is different than the reported port."
+	// The UDP source address (addr) is authoritative; if it differs from the
+	// port reported in the block, update the remote address to use the source
+	// port so subsequent connections target the correct endpoint.
+	if block.CharliePort != 0 && block.CharliePort != uint16(addr.Port) {
+		log.WithFields(logger.Fields{
+			"pkg": "ssu2", "func": "ProcessHolePunchResponse", "sessionID": sessionID,
+			"reported_port": block.CharliePort, "source_port": addr.Port,
+		}).Info("Hole Punch UDP source port differs from reported port; using source port (symmetric NAT)")
+		attempt.RemoteAddr = &net.UDPAddr{IP: addr.IP, Port: addr.Port}
 	}
 
 	// Mark as successful
@@ -698,7 +739,7 @@ func (hpc *HolePunchCoordinator) RemoveAttempt(sessionID uint64) {
 }
 
 // CleanupExpired removes expired hole punch attempts.
-// Attempts are considered expired after 30 seconds per I2P spec.
+// Attempts are considered expired after 30 seconds (implementation choice; the spec does not mandate a specific Hole Punch timeout).
 func (hpc *HolePunchCoordinator) CleanupExpired() {
 	hpc.mutex.Lock()
 	defer hpc.mutex.Unlock()

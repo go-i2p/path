@@ -1,5 +1,6 @@
-// Package ssu2 provides SSU2-specific implementations for the Noise Protocol Framework
-// supporting I2P's SSU2 transport protocol with UDP-based connections and NAT traversal.
+// Package ssu2path provides SSU2 path-management primitives for I2P's SSU2
+// transport protocol: hole-punching coordination, relay request/response
+// handling, peer testing, path validation, and their wire codecs.
 //
 // # Resource Management
 //
@@ -15,7 +16,6 @@ package ssu2path
 import (
 	"context"
 	"crypto/rand"
-	"encoding/binary"
 	"net"
 	"sync"
 	"time"
@@ -30,10 +30,11 @@ type TokenCacheAccessor interface {
 	InvalidateAddress(addr *net.UDPAddr)
 }
 
-// CongestionControllerAccessor provides congestion reset.
+// CongestionControllerAccessor provides congestion reset and window control.
 // Implemented by *ssu2/reliability.CongestionController.
 type CongestionControllerAccessor interface {
 	Reset()
+	SetCWND(cwnd int)
 }
 
 // PathValidator implements connection migration with path validation.
@@ -58,8 +59,8 @@ type PathValidator struct {
 	// conn is the SSU2 connection this validator belongs to
 	conn PathValidationConn
 
-	// challenges tracks active path validation attempts by challenge ID
-	challenges map[uint64]*PathChallenge
+	// challenges tracks active path validation attempts by challenge data
+	challenges map[string]*PathChallenge
 
 	// tokenCache is the optional token cache for invalidation on migration
 	tokenCache TokenCacheAccessor
@@ -99,14 +100,24 @@ type PathValidationConn interface {
 
 // PathChallenge represents an active path validation attempt.
 type PathChallenge struct {
-	// ChallengeID uniquely identifies this validation (8 bytes)
-	ChallengeID uint64
+	// ChallengeData is the arbitrary challenge payload (min 8 bytes recommended).
+	// The Path Response must echo this data verbatim.
+	ChallengeData []byte
 
 	// NewAddr is the new UDP address being validated
 	NewAddr *net.UDPAddr
 
-	// Timestamp is when the challenge was created
+	// Timestamp is when the challenge was created (Path Validation timer start).
 	Timestamp time.Time
+
+	// LastSentAt is when the challenge was last sent (Path Response timer start).
+	// Per the SSU2 spec, if no Path Response is received before the Path Response
+	// timer expires, the Path Challenge is resent and the timer is doubled.
+	LastSentAt time.Time
+
+	// ResponseTimer is the current Path Response timeout. It doubles on each
+	// expiry per the SSU2 spec. 0 means use PathResponseBaseTimer.
+	ResponseTimer time.Duration
 
 	// State tracks the validation progress
 	State PathChallengeState
@@ -155,15 +166,21 @@ func (s PathChallengeState) String() string {
 
 // Path validation timeouts
 const (
-	// PathValidationTimeout is how long to wait for path response.
-	// BUG-L04: 10 seconds chosen per I2P SSU2 spec §Connection Migration.
-	// Shorter than hole punch (30s) and peer test (60s) because path
-	// validation occurs mid-connection and requires tighter feedback.
+	// PathValidationTimeout is the Path Validation timer: the maximum total
+	// time to wait for path validation to complete. Per the SSU2 spec
+	// (Connection Migration), path validation fails when this timer expires.
+	// The spec leaves the exact value TBD ("several seconds or several times
+	// RTO"); 10 seconds is a reasonable default.
 	PathValidationTimeout = 10 * time.Second
 
+	// PathResponseBaseTimer is the initial Path Response timer. Per the SSU2
+	// spec, if no Path Response is received before it expires, the Path
+	// Challenge is resent and the timer is doubled.
+	PathResponseBaseTimer = 2 * time.Second
+
 	// PathValidationCleanupInterval is how often to clean up expired challenges.
-	// BUG-L04: 30 seconds = 3× PathValidationTimeout, balancing cleanup cost
-	// against memory pressure from abandoned challenges (added in BUG-M07 fix).
+	// 30 seconds = 3× PathValidationTimeout, balancing cleanup cost
+	// against memory pressure from abandoned challenges.
 	PathValidationCleanupInterval = 30 * time.Second
 )
 
@@ -189,10 +206,10 @@ const (
 //
 // Returns an initialized validator.
 func NewPathValidator(conn PathValidationConn) *PathValidator {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "NewPathValidator"}).Debug("Creating new PathValidator")
+	log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "NewPathValidator"}).Debug("Creating new PathValidator")
 	pv := &PathValidator{
 		conn:       conn,
-		challenges: make(map[uint64]*PathChallenge),
+		challenges: make(map[string]*PathChallenge),
 		stopCh:     make(chan struct{}),
 	}
 	go pv.cleanupLoop()
@@ -240,64 +257,89 @@ func (pv *PathValidator) SetCongestionController(cc CongestionControllerAccessor
 	pv.congestionController = cc
 }
 
+// reduceCongestionForValidation reduces the congestion window to the minimum
+// upon entering the path validation phase, as required by the SSU2 spec
+// (Connection Migration): "Reduce the congestion window to the minimum" and
+// "the congestion window and PMTU must remain at the minimum values during
+// the path validation phase". The PMTU is held at MinMTU (1280) by the
+// caller, which sends only Path Challenge blocks (no data) during validation.
+func (pv *PathValidator) reduceCongestionForValidation() {
+	pv.mutex.RLock()
+	cc := pv.congestionController
+	pv.mutex.RUnlock()
+	if cc != nil {
+		cc.SetCWND(MinMTU)
+	}
+}
+
 // InitiatePathValidation starts path validation for a new address.
 //
-// This sends a Path Challenge (Type 18) block to the new address with a
-// cryptographically random challenge ID. The peer must respond with a
-// Path Response (Type 19) containing the same challenge ID.
+// This sends a Path Challenge (Type 18) block to the new address with
+// cryptographically random challenge data. The peer must respond with a
+// Path Response (Type 19) containing the same challenge data.
 //
 // Parameters:
 //   - newAddr: The new UDP address to validate
 //
 // Returns:
-//   - uint64: The challenge ID for tracking this validation
+//   - []byte: The challenge data for tracking this validation
 //   - error: If challenge creation or sending fails
-func (pv *PathValidator) InitiatePathValidation(newAddr *net.UDPAddr) (uint64, error) {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "InitiatePathValidation"}).Debug("Initiating path validation")
+func (pv *PathValidator) InitiatePathValidation(newAddr *net.UDPAddr) ([]byte, error) {
+	log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "InitiatePathValidation"}).Debug("Initiating path validation")
 	if newAddr == nil {
-		return 0, oops.Errorf("new address is nil")
+		return nil, oops.Errorf("new address is nil")
 	}
 
-	// Generate cryptographic random challenge ID (8 bytes)
-	challengeID, err := generateChallengeID()
+	// Generate cryptographic random challenge data (8 bytes recommended)
+	challengeData, err := generateChallengeData()
 	if err != nil {
-		return 0, oops.Wrapf(err, "failed to generate challenge ID")
+		return nil, oops.Wrapf(err, "failed to generate challenge data")
 	}
 
 	// Create challenge tracking entry
+	now := time.Now()
 	challenge := &PathChallenge{
-		ChallengeID: challengeID,
-		NewAddr:     newAddr,
-		Timestamp:   time.Now(),
-		State:       ChallengeSent,
-		done:        make(chan struct{}), // BUG-014 fix: signal channel
+		ChallengeData: challengeData,
+		NewAddr:       newAddr,
+		Timestamp:     now,
+		LastSentAt:    now,
+		ResponseTimer: PathResponseBaseTimer,
+		State:         ChallengeSent,
+		done:          make(chan struct{}),
 	}
 
+	key := string(challengeData)
 	pv.mutex.Lock()
-	pv.challenges[challengeID] = challenge
+	pv.challenges[key] = challenge
 	pv.mutex.Unlock()
 
+	// Per the SSU2 spec (Connection Migration), upon entering the path
+	// validation phase the congestion window must be reduced to the minimum
+	// and the PMTU reduced to the minimum (1280), and both must remain at
+	// their minimum values during the validation phase.
+	pv.reduceCongestionForValidation()
+
 	// Send path challenge to new address
-	if err := pv.SendPathChallenge(challengeID, newAddr); err != nil {
+	if err := pv.SendPathChallenge(challengeData, newAddr); err != nil {
 		pv.mutex.Lock()
-		delete(pv.challenges, challengeID)
+		delete(pv.challenges, key)
 		pv.mutex.Unlock()
-		return 0, oops.Wrapf(err, "failed to send path challenge")
+		return nil, oops.Wrapf(err, "failed to send path challenge")
 	}
 
-	return challengeID, nil
+	return challengeData, nil
 }
 
 // SendPathChallenge sends a Path Challenge block to the specified address.
 //
 // Parameters:
-//   - challengeID: The 8-byte challenge identifier
+//   - challengeData: The arbitrary challenge payload
 //   - addr: The UDP address to send to
 //
 // Returns error if encoding or sending fails.
-func (pv *PathValidator) SendPathChallenge(challengeID uint64, addr *net.UDPAddr) error {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "SendPathChallenge", "challengeID": challengeID, "addr": addr}).Debug("Sending path challenge")
-	block := EncodePathChallenge(challengeID)
+func (pv *PathValidator) SendPathChallenge(challengeData []byte, addr *net.UDPAddr) error {
+	log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "SendPathChallenge", "addr": addr}).Debug("Sending path challenge")
+	block := EncodePathChallenge(challengeData)
 	if err := pv.conn.SendToAddress(block, addr); err != nil {
 		return oops.Wrapf(err, "failed to send path challenge to %v", addr)
 	}
@@ -316,7 +358,7 @@ func (pv *PathValidator) SendPathChallenge(challengeID uint64, addr *net.UDPAddr
 //
 // Returns error if decoding or response fails.
 func (pv *PathValidator) HandlePathChallenge(block *SSU2Block, fromAddr *net.UDPAddr) error {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "HandlePathChallenge", "fromAddr": fromAddr}).Debug("Processing received path challenge")
+	log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "HandlePathChallenge", "fromAddr": fromAddr}).Debug("Processing received path challenge")
 	if block == nil {
 		return oops.Errorf("block is nil")
 	}
@@ -324,43 +366,44 @@ func (pv *PathValidator) HandlePathChallenge(block *SSU2Block, fromAddr *net.UDP
 		return oops.Errorf("fromAddr is nil")
 	}
 
-	// Decode challenge ID
-	challengeID, err := DecodePathChallenge(block)
+	// Decode challenge data
+	challengeData, err := DecodePathChallenge(block)
 	if err != nil {
 		return oops.Wrapf(err, "failed to decode path challenge")
 	}
 
 	// Record challenge
 	challenge := &PathChallenge{
-		ChallengeID: challengeID,
-		NewAddr:     fromAddr,
-		Timestamp:   time.Now(),
-		State:       ChallengeReceived,
-		done:        make(chan struct{}), // BUG-014 fix: signal channel
+		ChallengeData: challengeData,
+		NewAddr:       fromAddr,
+		Timestamp:     time.Now(),
+		State:         ChallengeReceived,
+		done:          make(chan struct{}), // BUG-014 fix: signal channel
 	}
 
+	key := string(challengeData)
 	pv.mutex.Lock()
 	// L-4 fix: close old done channel before overwriting to unblock any waiter.
-	if old, exists := pv.challenges[challengeID]; exists && old.done != nil {
+	if old, exists := pv.challenges[key]; exists && old.done != nil {
 		close(old.done)
 	}
-	pv.challenges[challengeID] = challenge
+	pv.challenges[key] = challenge
 	pv.mutex.Unlock()
 
 	// Send response immediately
-	return pv.SendPathResponse(challengeID, fromAddr)
+	return pv.SendPathResponse(challengeData, fromAddr)
 }
 
 // SendPathResponse sends a Path Response block to the specified address.
 //
 // Parameters:
-//   - challengeID: The 8-byte challenge identifier from the Path Challenge
+//   - challengeData: The challenge data to echo back verbatim
 //   - addr: The UDP address to send to
 //
 // Returns error if encoding or sending fails.
-func (pv *PathValidator) SendPathResponse(challengeID uint64, addr *net.UDPAddr) error {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "SendPathResponse", "challengeID": challengeID, "addr": addr}).Debug("Sending path response")
-	block := EncodePathResponse(challengeID)
+func (pv *PathValidator) SendPathResponse(challengeData []byte, addr *net.UDPAddr) error {
+	log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "SendPathResponse", "addr": addr}).Debug("Sending path response")
+	block := EncodePathResponse(challengeData)
 	if err := pv.conn.SendToAddress(block, addr); err != nil {
 		return oops.Wrapf(err, "failed to send path response to %v", addr)
 	}
@@ -380,7 +423,7 @@ func (pv *PathValidator) SendPathResponse(challengeID uint64, addr *net.UDPAddr)
 //
 // Returns error if validation fails.
 func (pv *PathValidator) HandlePathResponse(block *SSU2Block, fromAddr *net.UDPAddr) error {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "HandlePathResponse", "fromAddr": fromAddr}).Debug("Processing received path response")
+	log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "HandlePathResponse", "fromAddr": fromAddr}).Debug("Processing received path response")
 	if block == nil {
 		return oops.Errorf("block is nil")
 	}
@@ -389,17 +432,18 @@ func (pv *PathValidator) HandlePathResponse(block *SSU2Block, fromAddr *net.UDPA
 	}
 
 	// Decode response
-	challengeID, err := DecodePathResponse(block)
+	challengeData, err := DecodePathResponse(block)
 	if err != nil {
 		return oops.Wrapf(err, "failed to decode path response")
 	}
 
+	key := string(challengeData)
 	// Find matching challenge, verify address, and mark validated — all under one lock
 	pv.mutex.Lock()
-	challenge, exists := pv.challenges[challengeID]
+	challenge, exists := pv.challenges[key]
 	if !exists {
 		pv.mutex.Unlock()
-		return oops.Errorf("no matching challenge for ID %d", challengeID)
+		return oops.Errorf("no matching challenge found")
 	}
 
 	// H-2 fix: guard against duplicate responses — second response for an already-validated
@@ -435,11 +479,11 @@ func (pv *PathValidator) HandlePathResponse(block *SSU2Block, fromAddr *net.UDPA
 	if challenge.ProbeSize > 0 {
 		// M-1 fix: delete the MTU probe challenge so it does not accumulate indefinitely.
 		pv.mutex.Lock()
-		delete(pv.challenges, challengeID)
+		delete(pv.challenges, key)
 		pv.mutex.Unlock()
 		return nil
 	}
-	return pv.ValidatePath(challengeID)
+	return pv.ValidatePath(challengeData)
 }
 
 // ValidatePath completes the path validation and migrates the connection.
@@ -448,27 +492,28 @@ func (pv *PathValidator) HandlePathResponse(block *SSU2Block, fromAddr *net.UDPA
 // It updates the connection's remote address to the validated path.
 //
 // Parameters:
-//   - challengeID: The challenge ID that was validated
+//   - challengeData: The challenge data that was validated
 //
 // Returns error if migration fails.
-func (pv *PathValidator) ValidatePath(challengeID uint64) error {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "ValidatePath", "challengeID": challengeID}).Debug("Validating path")
+func (pv *PathValidator) ValidatePath(challengeData []byte) error {
+	log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "ValidatePath"}).Debug("Validating path")
+	key := string(challengeData)
 	pv.mutex.Lock()
-	challenge, exists := pv.challenges[challengeID]
+	challenge, exists := pv.challenges[key]
 	if !exists {
 		pv.mutex.Unlock()
-		return oops.Errorf("no challenge found for ID %d", challengeID)
+		return oops.Errorf("no challenge found")
 	}
 
 	if challenge.State != ChallengeValidated {
 		pv.mutex.Unlock()
-		return oops.Errorf("challenge %d not validated (state: %v)", challengeID, challenge.State)
+		return oops.Errorf("challenge not validated (state: %v)", challenge.State)
 	}
 
 	newAddr := challenge.NewAddr
 	// BUG-002 fix: Delete challenge before unlock to prevent TOCTOU race
 	// This ensures side effects execute exactly once even with concurrent calls
-	delete(pv.challenges, challengeID)
+	delete(pv.challenges, key)
 
 	// BUG-006 fix: Read accessor fields under lock to prevent race
 	tokenCache := pv.tokenCache
@@ -507,14 +552,15 @@ func (pv *PathValidator) ValidatePath(challengeID uint64) error {
 // FailPath marks a path validation as failed.
 //
 // Parameters:
-//   - challengeID: The challenge ID to fail
+//   - challengeData: The challenge data to fail
 //   - reason: Error describing why validation failed
-func (pv *PathValidator) FailPath(challengeID uint64, reason error) {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "FailPath", "challengeID": challengeID}).Debug("Path validation failed")
+func (pv *PathValidator) FailPath(challengeData []byte, reason error) {
+	log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "FailPath"}).Debug("Path validation failed")
+	key := string(challengeData)
 	pv.mutex.Lock()
 	defer pv.mutex.Unlock()
 
-	if challenge, exists := pv.challenges[challengeID]; exists {
+	if challenge, exists := pv.challenges[key]; exists {
 		// H-2/M-2 fix: guard against double-fail and delete to prevent memory leak.
 		if challenge.State == ChallengeFailed || challenge.State == ChallengeValidated {
 			return
@@ -525,34 +571,36 @@ func (pv *PathValidator) FailPath(challengeID uint64, reason error) {
 			close(challenge.done)
 		}
 		// M-2 fix: delete terminal entry so it does not accumulate indefinitely.
-		delete(pv.challenges, challengeID)
+		delete(pv.challenges, key)
 	}
 }
 
 // GetChallenge returns information about a specific challenge.
 //
 // Parameters:
-//   - challengeID: The challenge ID to look up
+//   - challengeData: The challenge data to look up
 //
 // Returns:
 //   - *PathChallenge: Challenge information (defensive copy)
 //   - bool: Whether the challenge exists
-func (pv *PathValidator) GetChallenge(challengeID uint64) (*PathChallenge, bool) {
+func (pv *PathValidator) GetChallenge(challengeData []byte) (*PathChallenge, bool) {
 	pv.mutex.RLock()
 	defer pv.mutex.RUnlock()
 
-	challenge, exists := pv.challenges[challengeID]
+	challenge, exists := pv.challenges[string(challengeData)]
 	if !exists {
 		return nil, false
 	}
 
 	// Return defensive copy — include done so waitForProbeResult can select on it (H-1 fix).
 	pc := &PathChallenge{
-		ChallengeID: challenge.ChallengeID,
-		Timestamp:   challenge.Timestamp,
-		State:       challenge.State,
-		ProbeSize:   challenge.ProbeSize,
-		done:        challenge.done,
+		ChallengeData: challenge.ChallengeData,
+		Timestamp:     challenge.Timestamp,
+		LastSentAt:    challenge.LastSentAt,
+		ResponseTimer: challenge.ResponseTimer,
+		State:         challenge.State,
+		ProbeSize:     challenge.ProbeSize,
+		done:          challenge.done,
 	}
 	if challenge.NewAddr != nil {
 		addrCopy := *challenge.NewAddr
@@ -561,19 +609,29 @@ func (pv *PathValidator) GetChallenge(challengeID uint64) (*PathChallenge, bool)
 	return pc, true
 }
 
-// CleanupExpired removes expired path validation challenges.
+// CleanupExpired processes expired path validation challenges.
 //
-// Challenges are expired if they're older than PathValidationTimeout
-// and not in a terminal state (Validated or Failed).
+// Per the SSU2 spec (Connection Migration), two timers apply:
+//   - Path Response timer: if no Path Response is received before it expires,
+//     the Path Challenge is resent and the timer is doubled.
+//   - Path Validation timer: if it expires, path validation fails.
 //
-// Returns the number of challenges cleaned up.
+// This method resends challenges whose Path Response timer has expired (and
+// doubles that timer), and fails challenges whose Path Validation timer has
+// expired. Terminal-state entries are removed.
+//
+// Returns the number of challenges removed (failed or terminal-state).
 func (pv *PathValidator) CleanupExpired() int {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "CleanupExpired"}).Debug("Removing expired path validation challenges")
-	pv.mutex.Lock()
-	defer pv.mutex.Unlock()
-
+	log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "CleanupExpired"}).Debug("Processing expired path validation challenges")
 	now := time.Now()
+
+	// Phase 1: under the lock, classify challenges and collect resends.
+	pv.mutex.Lock()
 	cleaned := 0
+	var resends []struct {
+		challengeData []byte
+		addr          *net.UDPAddr
+	}
 
 	for id, challenge := range pv.challenges {
 		// Delete terminal-state entries that were not cleaned up at transition time
@@ -584,7 +642,7 @@ func (pv *PathValidator) CleanupExpired() int {
 			continue
 		}
 
-		// Check timeout
+		// Path Validation timer expired: fail the challenge.
 		if now.Sub(challenge.Timestamp) > PathValidationTimeout {
 			challenge.State = ChallengeFailed
 			// M-03 fix: close done channel so waitForProbeResult is woken up
@@ -594,82 +652,108 @@ func (pv *PathValidator) CleanupExpired() int {
 			}
 			delete(pv.challenges, id)
 			cleaned++
+			continue
+		}
+
+		// Path Response timer expired: resend the challenge and double the timer.
+		timer := challenge.ResponseTimer
+		if timer <= 0 {
+			timer = PathResponseBaseTimer
+		}
+		if now.Sub(challenge.LastSentAt) > timer {
+			resends = append(resends, struct {
+				challengeData []byte
+				addr          *net.UDPAddr
+			}{challenge.ChallengeData, challenge.NewAddr})
+			challenge.ResponseTimer = timer * 2
+			challenge.LastSentAt = now
+		}
+	}
+	pv.mutex.Unlock()
+
+	// Phase 2: outside the lock, resend challenges whose Path Response timer
+	// expired. Sending while holding the lock risks deadlock if the transport
+	// re-enters the validator.
+	for _, r := range resends {
+		if err := pv.SendPathChallenge(r.challengeData, r.addr); err != nil {
+			log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "CleanupExpired"}).
+				Warnf("Failed to resend path challenge: %v", err)
 		}
 	}
 
 	return cleaned
 }
 
-// generateChallengeID generates a cryptographically random 8-byte challenge ID.
-// BUG-009 fix: Retry if we get zero (probability 1/2^64)
-func generateChallengeID() (uint64, error) {
-	const maxAttempts = 3
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		var buf [8]byte
-		if _, err := rand.Read(buf[:]); err != nil {
-			return 0, oops.Wrapf(err, "failed to read random bytes")
-		}
-		id := binary.BigEndian.Uint64(buf[:])
-		if id != 0 {
-			return id, nil
-		}
-		// Extremely unlikely: got zero, retry
+// generateChallengeData generates a cryptographically random 8-byte challenge
+// payload. Per the SSU2 spec, Path Challenge data is arbitrary bytes (min 8
+// bytes recommended); the Path Response must echo it verbatim.
+func generateChallengeData() ([]byte, error) {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, oops.Wrapf(err, "failed to read random bytes for challenge data")
 	}
-	// BUG-007 fix: returning the literal 1 is as bad as returning 0 — it's a
-	// predictable, non-random value that could be exploited to collide challenge
-	// IDs. After exhausting retries (probability (1/2^64)^3 ≈ 0), treat it as a
-	// CSPRNG failure and surface the error to the caller.
-	return 0, oops.Errorf("failed to generate non-zero challenge ID after %d attempts", maxAttempts)
+	return buf, nil
 }
 
 // InitiateMTUProbe starts an MTU probe by sending a Path Challenge padded
 // to the given size. If a Path Response is received for this challenge,
 // the discovered MTU is updated (G-5).
-func (pv *PathValidator) InitiateMTUProbe(addr *net.UDPAddr, size int) (uint64, error) {
+func (pv *PathValidator) InitiateMTUProbe(addr *net.UDPAddr, size int) ([]byte, error) {
 	if addr == nil {
-		return 0, oops.Errorf("address is nil")
+		return nil, oops.Errorf("address is nil")
 	}
 	if size < MinMTU || size > MaxMTU {
-		return 0, oops.Errorf("probe size %d out of range [%d, %d]", size, MinMTU, MaxMTU)
+		return nil, oops.Errorf("probe size %d out of range [%d, %d]", size, MinMTU, MaxMTU)
 	}
 
-	challengeID, err := generateChallengeID()
+	core, err := generateChallengeData()
 	if err != nil {
-		return 0, oops.Wrapf(err, "failed to generate challenge ID for MTU probe")
+		return nil, oops.Wrapf(err, "failed to generate challenge data for MTU probe")
 	}
 
+	// The probe payload is the core challenge data padded to `size` bytes. Per
+	// the SSU2 spec the Path Response echoes the challenge data verbatim, so the
+	// peer returns the full padded payload — key the challenge by the exact bytes
+	// sent so the echoed response matches.
+	block := EncodePathChallengeWithPadding(core, size)
+	challengeData := block.Data
+	key := string(challengeData)
+
+	now := time.Now()
 	challenge := &PathChallenge{
-		ChallengeID: challengeID,
-		NewAddr:     addr,
-		Timestamp:   time.Now(),
-		State:       ChallengeSent,
-		ProbeSize:   size,
-		done:        make(chan struct{}), // BUG-014 fix: signal channel
+		ChallengeData: challengeData,
+		NewAddr:       addr,
+		Timestamp:     now,
+		LastSentAt:    now,
+		ResponseTimer: PathResponseBaseTimer,
+		State:         ChallengeSent,
+		ProbeSize:     size,
+		done:          make(chan struct{}),
 	}
 
 	pv.mutex.Lock()
-	pv.challenges[challengeID] = challenge
+	pv.challenges[key] = challenge
 	pv.mutex.Unlock()
 
-	block := EncodePathChallengeWithPadding(challengeID, size)
 	if err := pv.conn.SendToAddress(block, addr); err != nil {
 		pv.mutex.Lock()
-		delete(pv.challenges, challengeID)
+		delete(pv.challenges, key)
 		pv.mutex.Unlock()
-		return 0, oops.Wrapf(err, "failed to send MTU probe of size %d", size)
+		return nil, oops.Wrapf(err, "failed to send MTU probe of size %d", size)
 	}
 
-	return challengeID, nil
+	return challengeData, nil
 }
 
 // CompleteMTUProbe is called when a Path Response is received for an MTU
 // probe challenge. Updates discoveredMTU if this probe was larger than
 // the previously discovered value (G-5).
-func (pv *PathValidator) CompleteMTUProbe(challengeID uint64) {
+func (pv *PathValidator) CompleteMTUProbe(challengeData []byte) {
+	key := string(challengeData)
 	pv.mutex.Lock()
 	defer pv.mutex.Unlock()
 
-	challenge, exists := pv.challenges[challengeID]
+	challenge, exists := pv.challenges[key]
 	if !exists || challenge.ProbeSize == 0 {
 		return
 	}
@@ -682,7 +766,7 @@ func (pv *PathValidator) CompleteMTUProbe(challengeID uint64) {
 		close(challenge.done)
 	}
 	// M-1 fix: delete terminal MTU probe entry to prevent memory leak.
-	delete(pv.challenges, challengeID)
+	delete(pv.challenges, key)
 }
 
 // GetDiscoveredMTU returns the largest validated MTU from probing, or 0
@@ -696,7 +780,7 @@ func (pv *PathValidator) GetDiscoveredMTU() int {
 // waitForProbeResult waits for a probe to complete or timeout.
 // Returns true if the probe was validated, false otherwise.
 // This helper reduces cyclomatic complexity in RunPMTUD.
-func (pv *PathValidator) waitForProbeResult(ctx context.Context, id uint64) bool {
+func (pv *PathValidator) waitForProbeResult(ctx context.Context, challengeData []byte) bool {
 	deadline := time.Now().Add(PathValidationTimeout)
 	timeout := time.Until(deadline)
 	if timeout < 0 {
@@ -705,14 +789,14 @@ func (pv *PathValidator) waitForProbeResult(ctx context.Context, id uint64) bool
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
-	ch, exists := pv.GetChallenge(id)
+	ch, exists := pv.GetChallenge(challengeData)
 	if !exists {
 		return false
 	}
 
 	select {
 	case <-ctx.Done():
-		pv.FailPath(id, ctx.Err())
+		pv.FailPath(challengeData, ctx.Err())
 		return false
 	case <-ch.done:
 		// done is closed on both success (ChallengeValidated) and failure (ChallengeFailed).
@@ -743,7 +827,7 @@ func (pv *PathValidator) waitForProbeResult(ctx context.Context, id uint64) bool
 // RunPMTUD blocks until the search completes or ctx is cancelled.
 // BUG-L02 fix: Refactored to reduce cyclomatic complexity by extracting probe logic.
 func (pv *PathValidator) RunPMTUD(ctx context.Context, addr *net.UDPAddr, low, high int) int {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "RunPMTUD", "low": low, "high": high}).Debug("Running PMTUD")
+	log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "RunPMTUD", "low": low, "high": high}).Debug("Running PMTUD")
 	if low < MinMTU {
 		low = MinMTU
 	}
@@ -769,13 +853,13 @@ func (pv *PathValidator) RunPMTUD(ctx context.Context, addr *net.UDPAddr, low, h
 		// mid := (low + high) / 2 could overflow if low + high > MaxInt32
 		mid := low + (high-low)/2
 
-		id, err := pv.InitiateMTUProbe(addr, mid)
+		challengeData, err := pv.InitiateMTUProbe(addr, mid)
 		if err != nil {
 			high = mid - 1
 			continue
 		}
 
-		if pv.waitForProbeResult(ctx, id) {
+		if pv.waitForProbeResult(ctx, challengeData) {
 			best = mid
 			low = mid + 1
 		} else {

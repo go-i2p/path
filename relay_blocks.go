@@ -229,11 +229,12 @@ func DecodeRelayRequest(block *SSU2Block) (*RelayRequestBlock, error) {
 	ip := make([]byte, ipLen)
 	copy(ip, data[17:17+ipLen])
 
-	var sig []byte
-	if len(data) > 17+ipLen {
-		sig = make([]byte, len(data)-(17+ipLen))
-		copy(sig, data[17+ipLen:])
+	// Signature is mandatory: 64 bytes for Ed25519 (per SSU2 spec).
+	if len(data) < 17+ipLen+64 {
+		return nil, oops.Errorf("RelayRequest block too short for signature: need %d, have %d", 17+ipLen+64, len(data))
 	}
+	sig := make([]byte, 64)
+	copy(sig, data[17+ipLen:17+ipLen+64])
 
 	return &RelayRequestBlock{
 		Flag:      flag,
@@ -253,9 +254,26 @@ func DecodeRelayRequest(block *SSU2Block) (*RelayRequestBlock, error) {
 //
 //	[Flag:1][Code:1][Nonce:4][...]
 //
-// For Code 0 (accepted): includes Timestamp, Ver, Csz, CharliePort, CharlieIP, Signature, Token.
-// For Code >= 64 (Charlie rejection): includes Timestamp, Ver, Csz, CharliePort, CharlieIP, Signature.
-// For Code 1-63 (Bob rejection): only Flag, Code, Nonce.
+// Status code ranges (per SSU2 spec, RelayResponse block):
+//
+//   - 0: accept. Includes Timestamp, Ver, Csz, CharliePort, CharlieIP,
+//     Signature (Charlie), Token.
+//   - 1-63: rejected by Bob (1 unspecified, 2 Charlie banned, 3 limit
+//     exceeded, 4 signature failure, 5 relay tag not found, 6 Alice RI not
+//     found, 7-63 TBD). Only Flag, Code, Nonce are present; no signature
+//     ("Not present if rejected by Bob").
+//   - 64-127: rejected by Charlie (64 unspecified, 65 unsupported address,
+//     66 limit exceeded, 67 signature failure, 68 Alice already connected,
+//     69 Alice banned, 70 Alice unknown, 71-127 TBD). Includes Timestamp,
+//     Ver, Csz, CharliePort, CharlieIP, Signature (Charlie).
+//   - 128: reject, source and reason unspecified.
+//   - 129-255: other reject codes TBD.
+//
+// Per the spec's signature section, "If Charlie agrees (response code 0) or
+// rejects (response code 64 or higher), Charlie signs the response". Codes
+// 128-255 therefore use the same wire layout as the 64-127 Charlie-rejection
+// range (Timestamp, Ver, Csz, endpoint, Charlie signature); they are
+// semantically a distinct "reject, source and reason unspecified" category.
 func EncodeRelayResponse(resp *RelayResponseBlock) (*SSU2Block, error) {
 	if resp == nil {
 		return nil, oops.Errorf("RelayResponseBlock is nil")
@@ -265,9 +283,11 @@ func EncodeRelayResponse(resp *RelayResponseBlock) (*SSU2Block, error) {
 	if resp.Code == 0 {
 		return encodeRelayResponseAccepted(resp)
 	} else if resp.Code >= 64 {
+		// Charlie rejection (64-127) and "reject, source and reason
+		// unspecified" / TBD (128-255) share the same wire layout.
 		return encodeRelayResponseCharlieRejection(resp)
 	}
-	// Bob rejection (code 1-63): flag(1) + code(1) + nonce(4)
+	// Bob rejection (code 1-63): flag(1) + code(1) + nonce(4), no signature.
 	data := make([]byte, 6)
 	data[0] = resp.Flag
 	data[1] = resp.Code
@@ -294,6 +314,9 @@ func encodeRelayResponseAccepted(resp *RelayResponseBlock) (*SSU2Block, error) {
 	}
 	if len(resp.Token) != 8 {
 		return nil, oops.Errorf("token must be 8 bytes for accepted response, got %d", len(resp.Token))
+	}
+	if len(resp.Signature) != 64 {
+		return nil, oops.Errorf("signature must be 64 bytes for Ed25519, got %d", len(resp.Signature))
 	}
 	// flag(1)+code(1)+nonce(4)+ts(4)+ver(1)+csz(1)+port(2)+ip+sig+token(8)
 	dataSize := 1 + 1 + 4 + 4 + 1 + 1 + 2 + len(ipBytes) + len(resp.Signature) + 8
@@ -334,6 +357,13 @@ func encodeRelayResponseCharlieRejection(resp *RelayResponseBlock) (*SSU2Block, 
 // DecodeRelayResponse decodes a RelayResponse block from wire format.
 //
 // Wire format: [Flag:1][Code:1][Nonce:4][...]
+//
+// Status code ranges (per SSU2 spec): 0 accept; 1-63 rejected by Bob (no
+// signature, only Flag/Code/Nonce); 64-127 rejected by Charlie (with
+// Timestamp/Ver/Csz/endpoint/Charlie signature); 128 "reject, source and
+// reason unspecified"; 129-255 TBD. Codes 64 and above (including 128-255)
+// share the Charlie-rejection wire layout, so they are decoded with the
+// endpoint + signature fields.
 func DecodeRelayResponse(block *SSU2Block) (*RelayResponseBlock, error) {
 	if block == nil {
 		return nil, oops.Errorf("block is nil")
@@ -400,17 +430,14 @@ func decodeRelayResponseAccepted(resp *RelayResponseBlock, data []byte) (*RelayR
 	if err != nil {
 		return nil, err
 	}
-	// Remaining: signature + token(8)
+	// Remaining: signature (64 bytes for Ed25519) + token(8).
 	remaining := len(data) - off
-	if remaining < 8 {
-		return nil, oops.Errorf("accepted RelayResponse too short for token: %d remaining bytes", remaining)
+	if remaining < 64+8 {
+		return nil, oops.Errorf("accepted RelayResponse too short for signature+token: need %d, have %d remaining bytes", 64+8, remaining)
 	}
-	sigLen := remaining - 8
-	if sigLen > 0 {
-		resp.Signature = make([]byte, sigLen)
-		copy(resp.Signature, data[off:off+sigLen])
-		off += sigLen
-	}
+	resp.Signature = make([]byte, 64)
+	copy(resp.Signature, data[off:off+64])
+	off += 64
 	resp.Token = make([]byte, 8)
 	copy(resp.Token, data[off:off+8])
 	return resp, nil
@@ -422,10 +449,12 @@ func decodeRelayResponseCharlieRejection(resp *RelayResponseBlock, data []byte) 
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > off {
-		resp.Signature = make([]byte, len(data)-off)
-		copy(resp.Signature, data[off:])
+	// Signature is mandatory: 64 bytes for Ed25519 (per SSU2 spec).
+	if len(data) < off+64 {
+		return nil, oops.Errorf("Charlie rejection RelayResponse too short for signature: need %d, have %d", off+64, len(data))
 	}
+	resp.Signature = make([]byte, 64)
+	copy(resp.Signature, data[off:off+64])
 	return resp, nil
 }
 
@@ -518,11 +547,12 @@ func DecodeRelayIntro(block *SSU2Block) (*RelayIntroBlock, error) {
 	ip := make([]byte, ipLen)
 	copy(ip, data[49:49+ipLen])
 
-	var sig []byte
-	if len(data) > 49+ipLen {
-		sig = make([]byte, len(data)-(49+ipLen))
-		copy(sig, data[49+ipLen:])
+	// Signature is mandatory: 64 bytes for Ed25519 (per SSU2 spec).
+	if len(data) < 49+ipLen+64 {
+		return nil, oops.Errorf("RelayIntro block too short for signature: need %d, have %d", 49+ipLen+64, len(data))
 	}
+	sig := make([]byte, 64)
+	copy(sig, data[49+ipLen:49+ipLen+64])
 
 	return &RelayIntroBlock{
 		Flag:            flag,
@@ -576,6 +606,9 @@ func EncodeRelayTag(tag *RelayTagBlock) (*SSU2Block, error) {
 	if tag == nil {
 		return nil, oops.Errorf("RelayTagBlock is nil")
 	}
+	if tag.RelayTag == 0 {
+		return nil, oops.Errorf("relay tag must be non-zero")
+	}
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "EncodeRelayTag", "relayTag": tag.RelayTag}).Debug("Encoding relay tag block")
 
 	data := make([]byte, 4)
@@ -609,6 +642,9 @@ func DecodeRelayTag(block *SSU2Block) (*RelayTagBlock, error) {
 	}
 
 	relayTag := binary.BigEndian.Uint32(data[0:4])
+	if relayTag == 0 {
+		return nil, oops.Errorf("relay tag must be non-zero")
+	}
 
 	return &RelayTagBlock{
 		RelayTag: relayTag,
