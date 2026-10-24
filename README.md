@@ -10,7 +10,7 @@ SSU2 path management for the I2P network in Go. This package (`ssu2path`) implem
 - `github.com/go-i2p/go-noise` (for the SSU2 wire types; a local `replace` directive is available in `go.mod` for development against a local checkout)
 - `github.com/go-i2p/crypto` (for Ed25519 signatures)
 
-All Ed25519 signing and verification is delegated to `github.com/go-i2p/crypto/ed25519` rather than the standard library, so this package never imports `crypto/ed25519` directly. Nonces, relay tags, and challenge data are generated with `crypto/rand` as the SSU2 spec requires.
+All Ed25519 signing and verification is delegated to `github.com/go-i2p/crypto/ed25519` rather than the standard library, so this package never imports `crypto/ed25519` directly. Nonces, relay tags, and challenge data are generated with `github.com/go-i2p/crypto/rand` as the SSU2 spec requires.
 
 ---
 
