@@ -69,6 +69,13 @@ func NewIntroducerRegistry(maxCount int) *IntroducerRegistry {
 	if maxCount <= 0 {
 		maxCount = 3 // Default per I2P spec
 	}
+	// I2P spec (Introducers): only ih[0-2] are defined, so a router may
+	// publish at most 3 introducers. Clamp any larger request to 3 so a
+	// caller cannot build a registry that would publish more than the spec
+	// allows. This matches RelayManager, which hard-codes the same cap.
+	if maxCount > 3 {
+		maxCount = 3
+	}
 
 	return &IntroducerRegistry{
 		introducers: make([]*RegisteredIntroducer, 0, maxCount),

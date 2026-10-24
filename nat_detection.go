@@ -409,11 +409,24 @@ func isLocalAddress(ip net.IP) bool {
 
 // DetermineNATType analyzes test results to determine NAT type.
 //
-// Logic per I2P specification:
+// This is a supplementary, probe-based classifier. It derives a NATType from
+// the probe outcomes recorded in a TestResult (DirectProbeSuccess,
+// RelayedProbeSuccess, PortConsistent, IPConsistent):
+//
 //   - Both probes succeed + consistent port/IP = No NAT or Full Cone
 //   - Direct fails + relayed succeeds = Symmetric or Port-Restricted
 //   - Port inconsistent = Symmetric NAT
 //   - IP inconsistent = Multiple NATs or proxy
+//
+// It is NOT the spec's authoritative reachability result. The SSU2 spec
+// (Peer Test, "Results State Machine") derives the reachability outcome
+// (UNKNOWN / OK / FIREWALLED / SYMNAT) from which of messages 4, 5 and 7
+// were received (the nnn/ynn/nyn/yyn/yny/yyy combinations), not from probe
+// consistency. That message-receipt state machine is driven by the caller
+// (the router, which observes the actual Peer Test messages on the wire);
+// this package only tracks test state and provides this finer-grained NAT
+// classification as an aid. See the NATType doc comment for the mapping
+// between the two.
 //
 // Parameters:
 //   - result: Test result with probe outcomes

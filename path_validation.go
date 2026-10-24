@@ -653,11 +653,10 @@ func (pv *PathValidator) ValidatePath(challengeData []byte) error {
 
 	// BUG-002 fix: capture old address before migration so we can invalidate
 	// tokens only after SetRemoteAddr succeeds. Invalidating first would leave
-	// the connection in a broken state if SetRemoteAddr fails.
-	var oldAddr *net.UDPAddr
-	if tokenCache != nil {
-		oldAddr = pv.conn.GetRemoteAddr()
-	}
+	// the connection in a broken state if SetRemoteAddr fails. Captured
+	// unconditionally (not only when a token cache is present) so the IP
+	// change can be detected for the congestion-reset decision below.
+	oldAddr := pv.conn.GetRemoteAddr()
 
 	// Update connection remote address first; only proceed with side effects on success.
 	if err := pv.conn.SetRemoteAddr(newAddr); err != nil {
@@ -671,9 +670,13 @@ func (pv *PathValidator) ValidatePath(challengeData []byte) error {
 		tokenCache.InvalidateAddress(oldAddr)
 	}
 
-	// G-7: Reset congestion controller after successful path migration
-	// to re-enter slow start on the new path.
-	if congestionController != nil {
+	// Per the SSU2 spec (Connection Migration, "Successful Path Validation"):
+	// "if the IP address changed, reset the RTT and RTO to their initial
+	// values (a port-only change may retain congestion state)." So reset the
+	// congestion controller only when the IP actually changed; a port-only
+	// change retains the existing congestion state.
+	ipChanged := oldAddr == nil || !oldAddr.IP.Equal(newAddr.IP)
+	if congestionController != nil && ipChanged {
 		congestionController.Reset()
 	}
 

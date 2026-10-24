@@ -10,8 +10,16 @@ import (
 	"github.com/samber/oops"
 )
 
-// MaxClockSkew is the maximum allowed age (or future offset) of a signed timestamp.
-// Blocks outside this window are rejected to prevent replay attacks.
+// MaxClockSkew is the maximum allowed age (or future offset) of a signed
+// timestamp. Blocks outside this window are rejected to prevent replay
+// attacks.
+//
+// This is a defensive, non-spec hardening: the SSU2 spec does not mandate a
+// clock-skew window for signed blocks, so this check is stricter than the
+// spec requires. It is applied uniformly to relay request, relay response,
+// and peer test blocks. If a deployment has legitimate clock skew beyond
+// this window, signed blocks will be rejected; adjust this constant (or the
+// host clocks) accordingly.
 const MaxClockSkew = 5 * time.Minute
 
 // Relay signature prologues per SSU2 spec §Relay Request and §Relay Response.
@@ -143,7 +151,18 @@ func BuildRelayResponseSignedData(
 }
 
 // SignRelayResponse signs a relay response using the signer's Ed25519 private key.
-// For accepted responses (code 0), Charlie signs. For Bob rejections (code 1-63), Bob signs.
+//
+// For accepted responses (code 0) and Charlie rejections (code 64-127),
+// Charlie signs. For Bob rejections (code 1-63), Bob signs.
+//
+// Note on Bob rejections: the SSU2 spec is self-contradictory here. The
+// RelayResponse field layout states the signature is "Not present if
+// rejected by Bob" (code 1-63), but the spec's Notes section says "If Bob
+// rejects (response code 1-63), Bob signs the response and includes it in
+// this block." This package follows the field layout (the authoritative wire
+// format): the encoder emits no signature for code 1-63. This helper is
+// provided so a caller that follows the Notes interpretation can still
+// produce/verify a Bob signature, but the wire codec does not carry one.
 func SignRelayResponse(
 	privateKey ed25519.Ed25519PrivateKey,
 	bobHash data.Hash,
@@ -161,8 +180,14 @@ func SignRelayResponse(
 }
 
 // VerifyRelayResponseSignature verifies a relay response signature.
-// For accepted responses (code 0), use Charlie's public key.
-// For Bob rejections (code 1-63), use Bob's public key.
+// For accepted responses (code 0) and Charlie rejections (code 64-127),
+// use Charlie's public key. For Bob rejections (code 1-63), use Bob's
+// public key.
+//
+// Note on Bob rejections: see SignRelayResponse. The spec's field layout
+// (authoritative) carries no signature for code 1-63, so the wire codec
+// does not verify one; this helper is provided for callers that follow the
+// spec's Notes interpretation.
 func VerifyRelayResponseSignature(
 	publicKey ed25519.Ed25519PublicKey,
 	signature []byte,

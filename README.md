@@ -49,7 +49,7 @@ err = manager.AddPendingSession(sessionID, remoteAddr, introducerAddr, relayTag)
 
 ### PeerTestManager
 
-Implements the seven-message NAT testing protocol to determine NAT type and external reachability.
+Tracks peer test state (nonce, role, deadline, result) for the SSU2 seven-message peer test protocol. The wire protocol itself (sending/receiving messages 1–7) is driven by the router, which observes the actual messages and feeds outcomes back through this manager.
 
 ```go
 ptm := ssu2path.NewPeerTestManager(listener)
@@ -137,8 +137,8 @@ data, err = ssu2path.DecodePathResponse(block)
 
 - **UDP Hole Punching** — `HolePunchCoordinator` manages hole punch attempts with a state machine (Requested → Sent → Waiting → Success/Failed), up to 3 retries, and mandatory Ed25519 signature verification per SSU2 spec
 - **Relay Management** — `RelayManager` allocates cryptographically random relay tags, tracks introducers with 1-hour expiry, and manages pending sessions across concurrent goroutines
-- **NAT Type Detection** — Classifies NAT as None, Full Cone, Restricted Cone, Port-Restricted Cone, or Symmetric based on probe results
-- **Seven-Message Peer Testing** — `PeerTestManager` drives the full SSU2 peer test protocol (Alice ↔ Bob ↔ Charlie) to measure external reachability
+- **NAT Type Detection** — Classifies NAT as None, Full Cone, Restricted Cone, Port-Restricted Cone, or Symmetric based on probe results (a supplementary classifier; the authoritative reachability result is derived by the router from the seven-message protocol)
+- **Peer Test State Tracking** — `PeerTestManager` tracks state for the SSU2 seven-message peer test protocol (Alice ↔ Bob ↔ Charlie); the wire protocol is driven by the router
 - **Path Validation** — `PathValidator` safely migrates connections to new UDP paths using cryptographic challenge/response, with optional token cache invalidation, congestion window reset, and congestion cap management. Migration is rejected during the handshake (per spec) when the connection implements `HandshakePhase`
 - **Introducer Registry** — Keeps up to 3 fresh introducers sorted by last-seen time for RouterInfo publication
 - **Wire Format Codecs** — Encode/decode for relay blocks (Types 7, 8, 9, 15, 16), peer test blocks (Type 10, messages 1–7), and path blocks (Types 18, 19)
