@@ -12,6 +12,14 @@ SSU2 path management for the I2P network in Go. This package (`ssu2path`) implem
 
 All Ed25519 signing and verification is delegated to `github.com/go-i2p/crypto/ed25519` rather than the standard library, so this package never imports `crypto/ed25519` directly. Nonces, relay tags, and challenge data are generated with `github.com/go-i2p/crypto/rand` as the SSU2 spec requires.
 
+Because `crypto/ed25519` pulls in `filippo.io/edwards25519`, that module is a required indirect dependency. Verify changes the way a consumer sees them, with the shared `go.work` disabled:
+
+```bash
+GOWORK=off go mod tidy && GOWORK=off go build ./... && GOWORK=off go test ./...
+```
+
+`.github/workflows/go-test.yaml` runs exactly this, and also checks `go mod tidy -diff`, `go vet`, and `gofmt`. A workspace-only check can hide a missing transitive requirement, which is how the published module came to fail `go build` for proxy consumers.
+
 ---
 
 ## Installation

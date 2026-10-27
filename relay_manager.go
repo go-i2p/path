@@ -174,10 +174,10 @@ func (rm *RelayManager) Stop() {
 // The introducer can be used to relay connection requests to this peer when behind NAT.
 //
 // Design rationale:
-// - Maximum 3 introducers per I2P spec
-// - Introducers expire when their relay tag expires (the tag's real lifetime),
-//   so the published iexp matches the tag's actual expiry
-// - Oldest introducer is replaced if at capacity
+//   - Maximum 3 introducers per I2P spec
+//   - Introducers expire when their relay tag expires (the tag's real lifetime),
+//     so the published iexp matches the tag's actual expiry
+//   - Oldest introducer is replaced if at capacity
 //
 // Parameters:
 //   - addr: UDP address of the introducer

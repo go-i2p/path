@@ -1,0 +1,59 @@
+name: Go Tests
+
+# GOWORK=off is the point of this workflow. The shared go-i2p workspace
+# (go.work) lets sibling checkouts supply each other's transitive
+# requirements, so a workspace build can be green while the module is broken
+# for anyone who runs `go get` against the proxy. Every job here runs with
+# the workspace disabled so CI sees exactly what a consumer sees.
+on:
+  push:
+    branches: [main, master, develop, trunk]
+  pull_request:
+    branches: [main, master, develop, trunk]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # Must stay quoted: bare `off` is a YAML 1.1 boolean, which Actions
+      # would coerce to the string "false" instead of disabling the workspace.
+      GOWORK: "off"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify go.mod and go.sum are tidy
+        run: go mod tidy -diff
+
+      - name: Download and verify dependencies
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt-clean:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: Test
+        run: go test -race -count=1 ./...
