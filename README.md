@@ -82,6 +82,31 @@ validator.SetCongestionController(congestionController)
 challengeData, err := validator.InitiatePathValidation(newAddr)
 ```
 
+The connection is supplied through `PathValidationConn`, whose `SendToAddress`
+takes a **list** of blocks to be sent together in one Data packet:
+
+```go
+type PathValidationConn interface {
+	SendToAddress(blocks []*SSU2Block, addr *net.UDPAddr, wantACK bool) error
+	GetRemoteAddr() *net.UDPAddr
+	SetRemoteAddr(addr *net.UDPAddr) error
+}
+```
+
+Per ssu2.md §"Initiating Path Validation", a Path Challenge is "a data packet
+containing a Path Challenge block, an Address block (containing the new
+IP/port), and, typically, an ACK block", so `SendPathChallenge` and
+`SendPathResponse` send two blocks — the challenge/response plus the Address
+block — in a single packet. Without the Address block a conformant peer never
+learns the new IP/port from the challenge and so cannot validate it or initiate
+peer testing of it (§"Responding to Path Challenge").
+
+The ACK is the connection's responsibility, because it is derived from receive
+state that `PathValidator` cannot see. The `wantACK` argument says whether an
+ACK may be added: `true` for challenges and responses, `false` for PMTU probes,
+whose datagram size must be exact (§"PMTU Discovery"). A connection with nothing
+to acknowledge sends no ACK, which remains spec-conformant.
+
 Per the SSU2 spec, path validation is defined only for the data phase of a
 session — migration is not permitted during the handshake. If the connection
 passed to `NewPathValidator` implements the optional `HandshakePhase`
@@ -147,7 +172,7 @@ data, err = ssu2path.DecodePathResponse(block)
 - **Relay Management** — `RelayManager` allocates cryptographically random relay tags, expires each introducer when its relay tag expires (falling back to `DefaultRelayTagLifetime` for a tag it does not know), and manages pending sessions across concurrent goroutines
 - **NAT Type Detection** — Classifies NAT as None, Full Cone, Restricted Cone, Port-Restricted Cone, or Symmetric based on probe results (a supplementary classifier; the authoritative reachability result is derived by the router from the seven-message protocol)
 - **Peer Test State Tracking** — `PeerTestManager` tracks state for the SSU2 seven-message peer test protocol (Alice ↔ Bob ↔ Charlie); the wire protocol is driven by the router
-- **Path Validation** — `PathValidator` safely migrates connections to new UDP paths using cryptographic challenge/response, with optional token cache invalidation, congestion window reset, and congestion cap management. Migration is rejected during the handshake (per spec) when the connection implements `HandshakePhase`
+- **Path Validation** — `PathValidator` safely migrates connections to new UDP paths using cryptographic challenge/response, sending the Path Challenge or Path Response together with an Address block for the new IP/port in a single Data packet (per spec), and asking the connection to add an ACK except on PMTU probes. Includes optional token cache invalidation, congestion window reset, and congestion cap management. Migration is rejected during the handshake (per spec) when the connection implements `HandshakePhase`
 - **Introducer Registry** — Keeps up to 3 fresh introducers sorted by last-seen time for RouterInfo publication
 - **Wire Format Codecs** — Encode/decode for relay blocks (Types 7, 8, 9, 15, 16), peer test blocks (Type 10, messages 1–7), and path blocks (Types 18, 19)
 - **Thread Safety** — All public methods on all managers are safe for concurrent use

@@ -18,10 +18,18 @@ const (
 	BlockTypeAddress         = wire.BlockTypeAddress
 	BlockTypePathChallenge   = wire.BlockTypePathChallenge
 	BlockTypePathResponse    = wire.BlockTypePathResponse
+	BlockTypeACK             = wire.BlockTypeACK
 	BlockTypeRelayTag        = wire.BlockTypeRelayTag
 	BlockTypeNewToken        = wire.BlockTypeNewToken
 	BlockTypeRelayTagRequest = wire.BlockTypeRelayTagRequest
 )
 
-// Constructor alias
-var NewSSU2Block = wire.NewSSU2Block
+// Constructor aliases
+var (
+	NewSSU2Block = wire.NewSSU2Block
+
+	// NewAddressBlockForAddr builds the Address block (type 13) carrying an
+	// IP/port. Path Challenge packets include one for the new path per SSU2
+	// §"Initiating Path Validation".
+	NewAddressBlockForAddr = wire.NewAddressBlockForAddr
+)

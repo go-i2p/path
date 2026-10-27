@@ -1,6 +1,7 @@
 package ssu2path
 
 import (
+	"encoding/binary"
 	"net"
 	"sync"
 	"testing"
@@ -11,21 +12,35 @@ import (
 )
 
 // mockPathValidationConn implements PathValidationConn for testing.
+//
+// sentPackets holds one entry per SendToAddress call, each entry being the
+// blocks of that single Data packet, so multi-block packets are observable.
+// wantACKs records the flag per call, and ackBlocks is appended when the
+// caller wants an ACK, mimicking a real connection's contribution.
 type mockPathValidationConn struct {
 	sendToAddressCalled int
 	sendToAddressError  error
-	sentBlocks          []*SSU2Block
+	sentPackets         [][]*SSU2Block
 	sentAddrs           []*net.UDPAddr
+	wantACKs            []bool
 	remoteAddr          *net.UDPAddr
 	setRemoteAddrError  error
+	ackBlocks           int
 	mutex               sync.Mutex
 }
 
-func (m *mockPathValidationConn) SendToAddress(block *SSU2Block, addr *net.UDPAddr) error {
+func (m *mockPathValidationConn) SendToAddress(blocks []*SSU2Block, addr *net.UDPAddr, wantACK bool) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 	m.sendToAddressCalled++
-	m.sentBlocks = append(m.sentBlocks, block)
+	m.wantACKs = append(m.wantACKs, wantACK)
+	packets := make([]*SSU2Block, 0, len(blocks)+m.ackBlocks)
+	packets = append(packets, blocks...)
+	// Emulate a connection that contributes ACK blocks when asked.
+	for i := 0; i < m.ackBlocks && wantACK; i++ {
+		packets = append(packets, NewSSU2Block(BlockTypeACK, []byte{}))
+	}
+	m.sentPackets = append(m.sentPackets, packets)
 	m.sentAddrs = append(m.sentAddrs, addr)
 	return m.sendToAddressError
 }
@@ -46,13 +61,28 @@ func (m *mockPathValidationConn) SetRemoteAddr(addr *net.UDPAddr) error {
 	return nil
 }
 
-func (m *mockPathValidationConn) getLastSentBlock() *SSU2Block {
+// getLastSentPacket returns a copy of the blocks in the most recent packet.
+func (m *mockPathValidationConn) getLastSentPacket() []*SSU2Block {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	if len(m.sentBlocks) == 0 {
+	if len(m.sentPackets) == 0 {
 		return nil
 	}
-	return m.sentBlocks[len(m.sentBlocks)-1]
+	p := m.sentPackets[len(m.sentPackets)-1]
+	out := make([]*SSU2Block, len(p))
+	copy(out, p)
+	return out
+}
+
+// getLastSentBlock returns the first block of the most recent packet — the
+// Path Challenge or Path Response, ahead of the Address block appended per
+// SSU2 §"Message Contents".
+func (m *mockPathValidationConn) getLastSentBlock() *SSU2Block {
+	p := m.getLastSentPacket()
+	if len(p) == 0 {
+		return nil
+	}
+	return p[0]
 }
 
 func (m *mockPathValidationConn) getLastSentAddr() *net.UDPAddr {
@@ -68,8 +98,9 @@ func (m *mockPathValidationConn) resetCalls() {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 	m.sendToAddressCalled = 0
-	m.sentBlocks = nil
+	m.sentPackets = nil
 	m.sentAddrs = nil
+	m.wantACKs = nil
 }
 
 // TestNewPathValidator tests validator creation.
@@ -108,6 +139,112 @@ func TestPathValidator_InitiatePathValidation(t *testing.T) {
 	require.NotNil(t, sentBlock)
 	assert.Equal(t, BlockTypePathChallenge, sentBlock.Type)
 	assert.Equal(t, newAddr.String(), conn.getLastSentAddr().String())
+}
+
+// TestPathValidator_PathChallengeCarriesAddressBlock verifies PATH-2: the
+// Path Challenge must go out in a single Data packet together with an Address
+// block carrying the new IP/port, per SSU2 §"Initiating Path Validation".
+// Without the Address block a conformant peer cannot validate the new
+// IP/port or initiate peer testing of it.
+func TestPathValidator_PathChallengeCarriesAddressBlock(t *testing.T) {
+	conn := &mockPathValidationConn{}
+	pv := NewPathValidator(conn)
+
+	newAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.7"), Port: 11371}
+	challengeData, err := pv.InitiatePathValidation(newAddr)
+	require.NoError(t, err)
+
+	// One packet, not two sends.
+	require.Equal(t, 1, conn.sendToAddressCalled)
+	packet := conn.getLastSentPacket()
+	require.Len(t, packet, 2)
+
+	assert.Equal(t, uint8(BlockTypePathChallenge), packet[0].Type)
+	assert.Equal(t, uint8(BlockTypeAddress), packet[1].Type)
+
+	// The Address block must carry the new IP/port: port(2) + IPv4(4).
+	addrData := packet[1].Data
+	require.Len(t, addrData, 6)
+	assert.Equal(t, uint16(newAddr.Port), binary.BigEndian.Uint16(addrData[0:2]))
+	assert.Equal(t, newAddr.IP.To4(), net.IP(addrData[2:6]))
+
+	// The challenge itself is unchanged and still echoable.
+	echoed, err := DecodePathChallenge(packet[0])
+	require.NoError(t, err)
+	assert.Equal(t, challengeData, echoed)
+}
+
+// TestPathValidator_PathResponseCarriesAddressBlock verifies the responding
+// side sends the Path Response with an Address block for the recipient's
+// apparent IP, per SSU2 §"Message Contents".
+func TestPathValidator_PathResponseCarriesAddressBlock(t *testing.T) {
+	conn := &mockPathValidationConn{}
+	pv := NewPathValidator(conn)
+
+	challengeData := []byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02}
+	block := EncodePathChallenge(challengeData)
+	fromAddr := &net.UDPAddr{IP: net.ParseIP("198.51.100.23"), Port: 7777}
+
+	require.NoError(t, pv.HandlePathChallenge(block, fromAddr))
+
+	packet := conn.getLastSentPacket()
+	require.Len(t, packet, 2)
+	assert.Equal(t, uint8(BlockTypePathResponse), packet[0].Type)
+	assert.Equal(t, uint8(BlockTypeAddress), packet[1].Type)
+
+	addrData := packet[1].Data
+	require.Len(t, addrData, 6)
+	assert.Equal(t, uint16(fromAddr.Port), binary.BigEndian.Uint16(addrData[0:2]))
+	assert.Equal(t, fromAddr.IP.To4(), net.IP(addrData[2:6]))
+
+	echoed, err := DecodePathResponse(packet[0])
+	require.NoError(t, err)
+	assert.Equal(t, challengeData, echoed)
+}
+
+// TestPathValidator_MTUProbeIsSingleBlock verifies the PMTU probe stays
+// deliberately single-block: §"PMTU Discovery" sizes the probe exactly, so an
+// extra Address block would inflate the measured datagram.
+func TestPathValidator_MTUProbeIsSingleBlock(t *testing.T) {
+	conn := &mockPathValidationConn{}
+	pv := NewPathValidator(conn)
+
+	addr := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 5000}
+	_, err := pv.InitiateMTUProbe(addr, MinMTU)
+	require.NoError(t, err)
+
+	packet := conn.getLastSentPacket()
+	require.Len(t, packet, 1)
+	assert.Equal(t, uint8(BlockTypePathChallenge), packet[0].Type)
+	assert.Len(t, packet[0].Data, MinMTU)
+}
+
+// TestPathValidator_WantACKFlag verifies the wantACK flag path validation
+// passes to the connection: true for a Path Challenge and Path Response (which
+// the spec says typically carry an ACK), false for a PMTU probe (whose
+// datagram size must be exact). Also verifies a connection contributing ACK
+// blocks lands them in the same packet.
+func TestPathValidator_WantACKFlag(t *testing.T) {
+	conn := &mockPathValidationConn{ackBlocks: 1}
+	pv := NewPathValidator(conn)
+
+	addr := &net.UDPAddr{IP: net.ParseIP("203.0.113.50"), Port: 6060}
+
+	// Challenge: wantACK true, ACK appended to the same packet.
+	_, err := pv.InitiatePathValidation(addr)
+	require.NoError(t, err)
+	require.True(t, conn.wantACKs[0])
+	packet := conn.getLastSentPacket()
+	require.Len(t, packet, 3) // challenge + address + ack
+	assert.Equal(t, uint8(BlockTypeACK), packet[2].Type)
+
+	// MTU probe: wantACK false, single block.
+	conn.resetCalls()
+	_, err = pv.InitiateMTUProbe(addr, MinMTU)
+	require.NoError(t, err)
+	require.Len(t, conn.wantACKs, 1)
+	assert.False(t, conn.wantACKs[0])
+	assert.Len(t, conn.getLastSentPacket(), 1)
 }
 
 // TestPathValidator_InitiatePathValidation_NilAddress tests nil address handling.
@@ -543,9 +680,14 @@ func TestPathValidator_CleanupExpired_Resend(t *testing.T) {
 	assert.Equal(t, PathResponseBaseTimer*2, ch.ResponseTimer)
 	assert.WithinDuration(t, now, ch.LastSentAt, 2*time.Second)
 
-	// A Path Challenge was resent to the new address
-	assert.Equal(t, 1, len(conn.sentBlocks))
-	assert.Equal(t, uint8(BlockTypePathChallenge), conn.sentBlocks[0].Type)
+	// A Path Challenge was resent to the new address. The resent packet is a
+	// single Data packet carrying the challenge plus the Address block for the
+	// new IP/port (SSU2 §"Initiating Path Validation").
+	require.Equal(t, 1, len(conn.sentPackets))
+	packet := conn.sentPackets[0]
+	require.Equal(t, 2, len(packet))
+	assert.Equal(t, uint8(BlockTypePathChallenge), packet[0].Type)
+	assert.Equal(t, uint8(BlockTypeAddress), packet[1].Type)
 	assert.Equal(t, addr, conn.sentAddrs[0])
 }
 
@@ -779,11 +921,19 @@ func TestRunPMTUD_H1Fix(t *testing.T) {
 			default:
 			}
 			conn.mutex.Lock()
-			blocks := make([]*SSU2Block, len(conn.sentBlocks))
-			addrs := make([]*net.UDPAddr, len(conn.sentAddrs))
-			copy(blocks, conn.sentBlocks)
-			copy(addrs, conn.sentAddrs)
-			conn.sentBlocks = nil
+			var blocks []*SSU2Block
+			var addrs []*net.UDPAddr
+			for i, packet := range conn.sentPackets {
+				// Each packet may carry several blocks; pair every
+				// challenge/response block with that packet's address.
+				for _, b := range packet {
+					if b.Type == BlockTypePathChallenge || b.Type == BlockTypePathResponse {
+						blocks = append(blocks, b)
+						addrs = append(addrs, conn.sentAddrs[i])
+					}
+				}
+			}
+			conn.sentPackets = nil
 			conn.sentAddrs = nil
 			conn.mutex.Unlock()
 

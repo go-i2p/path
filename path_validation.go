@@ -122,8 +122,25 @@ type PathValidator struct {
 // PathValidationConn defines the interface for sending path validation messages.
 // This interface is implemented by SSU2Conn to allow testing with mocks.
 type PathValidationConn interface {
-	// SendToAddress sends a block to a specific UDP address
-	SendToAddress(block *SSU2Block, addr *net.UDPAddr) error
+	// SendToAddress sends one or more blocks in a single Data packet to addr.
+	//
+	// A list rather than a single block is required because the SSU2 spec
+	// pairs the Path Challenge with an Address block carrying the new
+	// IP/port (see §"Initiating Path Validation"), so the correct packet is
+	// not expressible through a one-block seam. A nil or empty slice is an
+	// error.
+	//
+	// When wantACK is true, the implementation should also append an ACK
+	// block for anything it has received but not yet acknowledged, as the
+	// spec says these packets carry "typically, an ACK block". Only the
+	// connection holds the receive state needed to build a correct ACK, so
+	// assembling it is the implementation's job and path validation stays
+	// ignorant of ack semantics. An implementation with nothing to
+	// acknowledge sends no ACK, which remains conformant.
+	//
+	// wantACK is false for PMTU probes: §"PMTU Discovery" sizes those
+	// datagrams deliberately, and an extra block would change the measurement.
+	SendToAddress(blocks []*SSU2Block, addr *net.UDPAddr, wantACK bool) error
 
 	// GetRemoteAddr returns the current remote address
 	GetRemoteAddr() *net.UDPAddr
@@ -457,7 +474,17 @@ func (pv *PathValidator) InitiatePathValidation(newAddr *net.UDPAddr) ([]byte, e
 	return challengeData, nil
 }
 
-// SendPathChallenge sends a Path Challenge block to the specified address.
+// SendPathChallenge sends a Path Challenge to the specified address as a
+// single Data packet.
+//
+// Per the SSU2 spec (§"Initiating Path Validation"), the challenge is sent as
+// "a data packet containing a Path Challenge block, an Address block
+// (containing the new IP/port), and, typically, an ACK block". The Address
+// block is included here so the peer can learn and validate the new IP/port;
+// the ACK is requested from the PathValidationConn implementation (wantACK
+// true), which is the side that holds the receive state needed to build one.
+// Omitting the ACK stays spec-conformant — the spec calls it typical, not
+// required.
 //
 // Parameters:
 //   - challengeData: The arbitrary challenge payload
@@ -466,8 +493,11 @@ func (pv *PathValidator) InitiatePathValidation(newAddr *net.UDPAddr) ([]byte, e
 // Returns error if encoding or sending fails.
 func (pv *PathValidator) SendPathChallenge(challengeData []byte, addr *net.UDPAddr) error {
 	log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "SendPathChallenge", "addr": addr}).Debug("Sending path challenge")
-	block := EncodePathChallenge(challengeData)
-	if err := pv.conn.SendToAddress(block, addr); err != nil {
+	blocks := []*SSU2Block{
+		EncodePathChallenge(challengeData),
+		NewAddressBlockForAddr(addr),
+	}
+	if err := pv.conn.SendToAddress(blocks, addr, true); err != nil {
 		return oops.Wrapf(err, "failed to send path challenge to %v", addr)
 	}
 	return nil
@@ -521,7 +551,14 @@ func (pv *PathValidator) HandlePathChallenge(block *SSU2Block, fromAddr *net.UDP
 	return pv.SendPathResponse(challengeData, fromAddr)
 }
 
-// SendPathResponse sends a Path Response block to the specified address.
+// SendPathResponse sends a Path Response to the specified address as a single
+// Data packet.
+//
+// §"Message Contents" lists an "Address block containing the recipient's
+// apparent IP" among the blocks these Data messages should carry, so the
+// response includes the address of the peer we are answering (as we observed
+// it in the Path Challenge's source address). An ACK is requested from the
+// connection, matching the challenge side.
 //
 // Parameters:
 //   - challengeData: The challenge data to echo back verbatim
@@ -530,8 +567,11 @@ func (pv *PathValidator) HandlePathChallenge(block *SSU2Block, fromAddr *net.UDP
 // Returns error if encoding or sending fails.
 func (pv *PathValidator) SendPathResponse(challengeData []byte, addr *net.UDPAddr) error {
 	log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "SendPathResponse", "addr": addr}).Debug("Sending path response")
-	block := EncodePathResponse(challengeData)
-	if err := pv.conn.SendToAddress(block, addr); err != nil {
+	blocks := []*SSU2Block{
+		EncodePathResponse(challengeData),
+		NewAddressBlockForAddr(addr),
+	}
+	if err := pv.conn.SendToAddress(blocks, addr, true); err != nil {
 		return oops.Wrapf(err, "failed to send path response to %v", addr)
 	}
 	return nil
@@ -892,7 +932,10 @@ func (pv *PathValidator) InitiateMTUProbe(addr *net.UDPAddr, size int) ([]byte, 
 	pv.challenges[key] = challenge
 	pv.mutex.Unlock()
 
-	if err := pv.conn.SendToAddress(block, addr); err != nil {
+	// Deliberately single-block with wantACK false: §"PMTU Discovery" sizes the
+	// probe exactly, so an extra Address or ACK block would inflate the
+	// measured datagram.
+	if err := pv.conn.SendToAddress([]*SSU2Block{block}, addr, false); err != nil {
 		pv.mutex.Lock()
 		delete(pv.challenges, key)
 		pv.mutex.Unlock()
