@@ -24,8 +24,8 @@ const RelayResponseTokenTTL = 10 * time.Second
 //
 // Design rationale:
 //   - Relay tags are cryptographically random 4-byte values for security
-//   - Introducers expire after 1 hour (implementation choice; the SSU2 spec
-//     does not mandate a specific introducer expiry value)
+//   - Introducers expire when their relay tag expires (the tag's real
+//     lifetime), so the published iexp matches the tag's actual expiry
 //   - Pending sessions track connections awaiting hole punch completion
 //   - Thread-safe for concurrent relay operations
 //
@@ -167,7 +167,8 @@ func (rm *RelayManager) Stop() {
 //
 // Design rationale:
 // - Maximum 3 introducers per I2P spec
-// - Introducers expire after 1 hour
+// - Introducers expire when their relay tag expires (the tag's real lifetime),
+//   so the published iexp matches the tag's actual expiry
 // - Oldest introducer is replaced if at capacity
 //
 // Parameters:
@@ -208,7 +209,9 @@ func (rm *RelayManager) RegisterIntroducer(addr *net.UDPAddr, routerHash data.Ha
 		if addrEqual(intro.Addr, addr) {
 			// Update existing
 			intro.RelayTag = relayTag
-			intro.ExpiresAt = time.Now().Add(1 * time.Hour)
+			// S-16 fix: use the real relay-tag lifetime so the published iexp
+			// matches the tag's actual expiry, not a hardcoded 1h.
+			intro.ExpiresAt = rm.relayTagExpiry(relayTag)
 			return nil
 		}
 	}
@@ -221,7 +224,9 @@ func (rm *RelayManager) RegisterIntroducer(addr *net.UDPAddr, routerHash data.Ha
 		Addr:       &addrCopy,
 		RouterHash: routerHash,
 		RelayTag:   relayTag,
-		ExpiresAt:  time.Now().Add(1 * time.Hour),
+		// S-16 fix: use the real relay-tag lifetime so the published iexp
+		// matches the tag's actual expiry, not a hardcoded 1h.
+		ExpiresAt: rm.relayTagExpiry(relayTag),
 	}
 
 	// Add or replace oldest
@@ -274,6 +279,20 @@ func (rm *RelayManager) GetIntroducers() []*IntroducerInfo {
 	}
 
 	return result
+}
+
+// relayTagExpiry returns the real expiry of the given relay tag, so that an
+// introducer's ExpiresAt (and thus the published iexp) reflects the tag's
+// actual lifetime rather than a hardcoded value. Callers must hold rm.mutex.
+//
+// If the tag is not present in the map (e.g. it was allocated by a different
+// component, or already cleaned up), it falls back to the default 1-hour
+// lifetime so the introducer still expires.
+func (rm *RelayManager) relayTagExpiry(relayTag uint32) time.Time {
+	if tag, ok := rm.relayTags[relayTag]; ok && !tag.ExpiresAt.IsZero() {
+		return tag.ExpiresAt
+	}
+	return time.Now().Add(1 * time.Hour)
 }
 
 // RemoveIntroducer removes an introducer by address.
