@@ -15,10 +15,11 @@ package ssu2path
 
 import (
 	"context"
-	"github.com/go-i2p/crypto/rand"
 	"net"
 	"sync"
 	"time"
+
+	"github.com/go-i2p/crypto/rand"
 
 	"github.com/go-i2p/logger"
 	"github.com/samber/oops"

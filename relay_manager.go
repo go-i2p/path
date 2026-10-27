@@ -1,11 +1,12 @@
 package ssu2path
 
 import (
-	"github.com/go-i2p/crypto/rand"
 	"encoding/binary"
 	"net"
 	"sync"
 	"time"
+
+	"github.com/go-i2p/crypto/rand"
 
 	"github.com/go-i2p/common/data"
 	"github.com/go-i2p/logger"
@@ -22,11 +23,11 @@ const RelayResponseTokenTTL = 10 * time.Second
 // It handles relay tag allocation, introducer registration, and relay request processing.
 //
 // Design rationale:
-// - Relay tags are cryptographically random 4-byte values for security
-// - Introducers expire after 1 hour (implementation choice; the SSU2 spec
-//   does not mandate a specific introducer expiry value)
-// - Pending sessions track connections awaiting hole punch completion
-// - Thread-safe for concurrent relay operations
+//   - Relay tags are cryptographically random 4-byte values for security
+//   - Introducers expire after 1 hour (implementation choice; the SSU2 spec
+//     does not mandate a specific introducer expiry value)
+//   - Pending sessions track connections awaiting hole punch completion
+//   - Thread-safe for concurrent relay operations
 //
 // Thread Safety: All public methods are thread-safe.
 type RelayManager struct {

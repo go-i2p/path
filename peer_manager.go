@@ -1,11 +1,12 @@
 package ssu2path
 
 import (
-	"github.com/go-i2p/crypto/rand"
 	"encoding/binary"
 	"net"
 	"sync"
 	"time"
+
+	"github.com/go-i2p/crypto/rand"
 
 	"github.com/go-i2p/logger"
 	"github.com/samber/oops"

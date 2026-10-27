@@ -83,13 +83,13 @@ type HolePunchContextResolver func(info HolePunchVerifyInfo) (
 // encoder/decoder and VerifyRelayResponseSignature in relay_signature.go.
 //
 // Design rationale:
-// - Session IDs are cryptographically random 64-bit values for security
-// - Maximum 3 retry attempts (implementation choice; the spec does not mandate
-//   a specific Hole Punch retry count)
-// - 30-second timeout per attempt (implementation choice; the spec does not
-//   mandate a specific Hole Punch timeout)
-// - State machine: Requested → Sent → Waiting → Success/Failed
-// - Signature verification is MANDATORY per SSU2 spec and must be provided at construction
+//   - Session IDs are cryptographically random 64-bit values for security
+//   - Maximum 3 retry attempts (implementation choice; the spec does not mandate
+//     a specific Hole Punch retry count)
+//   - 30-second timeout per attempt (implementation choice; the spec does not
+//     mandate a specific Hole Punch timeout)
+//   - State machine: Requested → Sent → Waiting → Success/Failed
+//   - Signature verification is MANDATORY per SSU2 spec and must be provided at construction
 //
 // Thread Safety: All public methods are thread-safe.
 type HolePunchCoordinator struct {
