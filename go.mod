@@ -6,8 +6,8 @@ go 1.26.8
 
 require (
 	github.com/go-i2p/common v0.1.70002-0.20261013062227-da2d25f84cdb
-	github.com/go-i2p/crypto v0.1.70002-0.20261013135807-86425eac6c59
-	github.com/go-i2p/go-noise v0.1.70002-0.20261013145830-a7782a85e848
+	github.com/go-i2p/crypto v0.1.70002-0.20261027053312-d22b54cc63a6
+	github.com/go-i2p/go-noise v0.1.70002-0.20261027022412-3cd5371ed85a
 	github.com/go-i2p/logger v0.1.70001
 	github.com/samber/oops v1.23.1
 	github.com/stretchr/testify v1.12.1
@@ -16,12 +16,14 @@ require (
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/dchest/siphash v1.2.3 // indirect
+	github.com/go-i2p/elgamal v0.1.70001 // indirect
+	github.com/go-i2p/noise v1.1.70001-0.20261013005149-88e8cbb61acc // indirect
 	github.com/oklog/ulid/v2 v2.1.2 // indirect
 	github.com/samber/lo v1.53.0 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect
 	go.opentelemetry.io/otel v1.46.0 // indirect
 	go.opentelemetry.io/otel/trace v1.46.0 // indirect
+	go.step.sm/crypto v0.90.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
