@@ -19,6 +19,14 @@ import (
 // while still requiring near-immediate use; the spec does not mandate a specific value.
 const RelayResponseTokenTTL = 10 * time.Second
 
+// DefaultRelayTagLifetime is how long an allocated relay tag stays valid, and
+// the fallback expiry for a tag this manager does not know about. The SSU2
+// spec defines no relay-tag lifetime, so the value is an implementation
+// choice — but it is shared by AllocateRelayTag (which stamps real tags) and
+// relayTagExpiry (which answers for unknown ones) so the iexp published for an
+// introducer can never drift from the lifetime the tags themselves get.
+const DefaultRelayTagLifetime = 1 * time.Hour
+
 // RelayManager manages relay connections and introducer services for NAT traversal.
 // It handles relay tag allocation, introducer registration, and relay request processing.
 //
@@ -286,13 +294,13 @@ func (rm *RelayManager) GetIntroducers() []*IntroducerInfo {
 // actual lifetime rather than a hardcoded value. Callers must hold rm.mutex.
 //
 // If the tag is not present in the map (e.g. it was allocated by a different
-// component, or already cleaned up), it falls back to the default 1-hour
-// lifetime so the introducer still expires.
+// component, or already cleaned up), it falls back to DefaultRelayTagLifetime
+// so the introducer still expires.
 func (rm *RelayManager) relayTagExpiry(relayTag uint32) time.Time {
 	if tag, ok := rm.relayTags[relayTag]; ok && !tag.ExpiresAt.IsZero() {
 		return tag.ExpiresAt
 	}
-	return time.Now().Add(1 * time.Hour)
+	return time.Now().Add(DefaultRelayTagLifetime)
 }
 
 // RemoveIntroducer removes an introducer by address.
@@ -387,7 +395,7 @@ func (rm *RelayManager) AllocateRelayTag(addr *net.UDPAddr) (uint32, error) {
 			Tag:       tag,
 			ForAddr:   addr,
 			CreatedAt: time.Now(),
-			ExpiresAt: time.Now().Add(1 * time.Hour),
+			ExpiresAt: time.Now().Add(DefaultRelayTagLifetime),
 		}
 		return tag, nil
 	}

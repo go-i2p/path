@@ -136,7 +136,7 @@ data, err = ssu2path.DecodePathResponse(block)
 ## Features
 
 - **UDP Hole Punching** — `HolePunchCoordinator` manages hole punch attempts with a state machine (Requested → Sent → Waiting → Success/Failed), up to 3 retries, and mandatory Ed25519 signature verification per SSU2 spec
-- **Relay Management** — `RelayManager` allocates cryptographically random relay tags, tracks introducers with 1-hour expiry, and manages pending sessions across concurrent goroutines
+- **Relay Management** — `RelayManager` allocates cryptographically random relay tags, expires each introducer when its relay tag expires (falling back to `DefaultRelayTagLifetime` for a tag it does not know), and manages pending sessions across concurrent goroutines
 - **NAT Type Detection** — Classifies NAT as None, Full Cone, Restricted Cone, Port-Restricted Cone, or Symmetric based on probe results (a supplementary classifier; the authoritative reachability result is derived by the router from the seven-message protocol)
 - **Peer Test State Tracking** — `PeerTestManager` tracks state for the SSU2 seven-message peer test protocol (Alice ↔ Bob ↔ Charlie); the wire protocol is driven by the router
 - **Path Validation** — `PathValidator` safely migrates connections to new UDP paths using cryptographic challenge/response, with optional token cache invalidation, congestion window reset, and congestion cap management. Migration is rejected during the handshake (per spec) when the connection implements `HandshakePhase`
