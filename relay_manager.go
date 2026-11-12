@@ -145,8 +145,29 @@ func (rm *RelayManager) Start() {
 
 	if rm.cleanupTimer == nil && !rm.stopped {
 		log.WithFields(logger.Fields{"pkg": "ssu2", "func": "Start"}).Debug("Starting RelayManager cleanup timer")
-		rm.cleanupTimer = time.AfterFunc(5*time.Minute, rm.CleanupExpired)
+		rm.cleanupTimer = time.AfterFunc(5*time.Minute, rm.cleanupTick)
 	}
+}
+
+// cleanupTick is the cleanup timer's callback. It recovers from a panic in
+// CleanupExpired and always reschedules the next tick, so a single panic —
+// which would otherwise both kill the router process and permanently break the
+// self-rescheduling chain — is contained to one skipped interval. I2P-004.
+func (rm *RelayManager) cleanupTick() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.WithFields(logger.Fields{"pkg": "ssu2", "func": "cleanupTick", "panic": r}).
+				Error("recovered from panic in relay cleanup tick; skipping this interval")
+		}
+		// Reschedule unconditionally (unless stopped) so cleanup continues even
+		// if the body panicked before reaching its own reschedule.
+		rm.mutex.Lock()
+		if rm.cleanupTimer != nil && !rm.stopped {
+			rm.cleanupTimer.Reset(5 * time.Minute)
+		}
+		rm.mutex.Unlock()
+	}()
+	rm.CleanupExpired()
 }
 
 // Stop stops the relay manager and cleans up resources.

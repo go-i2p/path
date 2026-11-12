@@ -987,3 +987,73 @@ func TestHandlePathResponse_H2Fix(t *testing.T) {
 	wg.Wait()
 	close(errs)
 }
+
+// TestPathValidator_HandlePathChallenge_PanicDoesNotWedgeMutex proves the
+// I2P-004 aggravator fix: HandlePathChallenge must release pv.mutex even when
+// a panic fires while the lock is held. The pre-fix code locked, then closed
+// the old challenge's done channel, then unlocked; a duplicate challenge
+// (PATH-001: close of an already-closed channel) panicked between Lock and
+// Unlock, permanently wedging the mutex for every later operation — even one
+// where a caller higher in the stack recovered the panic.
+func TestPathValidator_HandlePathChallenge_PanicDoesNotWedgeMutex(t *testing.T) {
+	conn := &mockPathValidationConn{}
+	pv := NewPathValidator(conn)
+	defer pv.Stop()
+
+	challengeData := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	block := EncodePathChallenge(challengeData)
+	fromAddr := &net.UDPAddr{IP: net.ParseIP("10.0.0.50"), Port: 9090}
+
+	// Seed a ChallengeValidated entry whose done channel is already closed,
+	// so the L-4 overwrite path closes a closed channel and panics.
+	key := string(challengeData)
+	seed := &PathChallenge{
+		ChallengeData: challengeData,
+		NewAddr:       fromAddr,
+		Timestamp:     time.Now(),
+		State:         ChallengeValidated,
+		done:          make(chan struct{}),
+	}
+	close(seed.done)
+	pv.mutex.Lock()
+	pv.challenges[key] = seed
+	pv.mutex.Unlock()
+
+	// The duplicate challenge must panic (PATH-001), and the caller recovers.
+	require.Panics(t, func() {
+		_ = pv.HandlePathChallenge(block, fromAddr)
+	})
+
+	// With the deferred-unlock fix the mutex is free: a subsequent locked
+	// operation must complete rather than deadlock. Run it with a timeout so
+	// a regression fails the test instead of hanging the suite.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pv.mutex.Lock()
+		pv.mutex.Unlock()
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pv.mutex wedged after recovered panic in HandlePathChallenge")
+	}
+}
+
+// TestRecoverTickContainsPanic proves the I2P-004 per-tick recover seam used
+// by every cleanup loop in this package: a panicking tick is logged and
+// swallowed, and the caller (the cleanup goroutine) survives.
+func TestRecoverTickContainsPanic(t *testing.T) {
+	var ran bool
+	// Must not panic out of recoverTick.
+	recoverTick("test.tick", func() {
+		ran = true
+		panic("simulated cleanup panic")
+	})
+	assert.True(t, ran)
+
+	// A normal tick runs normally.
+	var normalRan bool
+	recoverTick("test.tick", func() { normalRan = true })
+	assert.True(t, normalRan)
+}

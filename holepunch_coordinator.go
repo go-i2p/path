@@ -224,7 +224,8 @@ func (hpc *HolePunchCoordinator) cleanupLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			hpc.CleanupExpired()
+			// I2P-004: recover so a panic in cleanup cannot kill the router.
+			recoverTick("HolePunchCoordinator.cleanupLoop", hpc.CleanupExpired)
 		case <-hpc.stopCh:
 			return
 		}

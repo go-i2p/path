@@ -6,8 +6,30 @@ import (
 	"time"
 
 	"github.com/go-i2p/crypto/ed25519"
+	"github.com/go-i2p/logger"
 	"github.com/samber/oops"
 )
+
+// recoverTick runs a periodic maintenance function (a cleanup tick) and
+// recovers from any panic it raises, so a panic in one manager's cleanup
+// cannot kill the whole router process. I2P-004: these ticks run on their own
+// background goroutines with no upstream recover seam, and their work is
+// reachable from remote input (expired entries created by remote challenges,
+// relays and peer tests), so a panic there is remotely triggerable.
+//
+// The panic is logged with the tick's name and the recovered value; the
+// goroutine then survives to the next tick. This is a last-resort seam — a
+// panic still means the current tick's cleanup was skipped, so entries may
+// linger one extra interval, but the process and the manager stay alive.
+func recoverTick(name string, fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.WithFields(logger.Fields{"pkg": "ssu2path", "func": name, "panic": r}).
+				Error("recovered from panic in cleanup tick; skipping this interval")
+		}
+	}()
+	fn()
+}
 
 // HolePunchSessionTimeout is the maximum lifetime of a pending hole-punch
 // session. Shared by HolePunchCoordinator and RelayManager cleanup loops so

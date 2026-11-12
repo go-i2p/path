@@ -218,7 +218,8 @@ func (ptm *PeerTestManager) cleanupLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			ptm.CleanupExpired()
+			// I2P-004: recover so a panic in cleanup cannot kill the router.
+			recoverTick("PeerTestManager.cleanupLoop", ptm.CleanupExpired)
 		case <-ptm.stopCh:
 			return
 		}

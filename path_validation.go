@@ -308,7 +308,8 @@ func (pv *PathValidator) cleanupLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			pv.CleanupExpired()
+			// I2P-004: recover so a panic in cleanup cannot kill the router.
+			recoverTick("PathValidator.cleanupLoop", func() { pv.CleanupExpired() })
 		case <-pv.stopCh:
 			return
 		}
@@ -539,13 +540,22 @@ func (pv *PathValidator) HandlePathChallenge(block *SSU2Block, fromAddr *net.UDP
 	}
 
 	key := string(challengeData)
-	pv.mutex.Lock()
-	// L-4 fix: close old done channel before overwriting to unblock any waiter.
-	if old, exists := pv.challenges[key]; exists && old.done != nil {
-		close(old.done)
-	}
-	pv.challenges[key] = challenge
-	pv.mutex.Unlock()
+	// I2P-004 aggravator fix: record the challenge under a deferred unlock so a
+	// panic raised while holding the lock — PATH-001's close-of-closed-channel
+	// on a duplicate challenge, or any future callback bug — cannot wedge
+	// pv.mutex for a caller that recovers higher in the stack. Without the
+	// defer, the panic fires between Lock and Unlock and every later
+	// path-validation operation deadlocks on the orphaned lock. The lock is
+	// released before the network send below.
+	func() {
+		pv.mutex.Lock()
+		defer pv.mutex.Unlock()
+		// L-4 fix: close old done channel before overwriting to unblock any waiter.
+		if old, exists := pv.challenges[key]; exists && old.done != nil {
+			close(old.done)
+		}
+		pv.challenges[key] = challenge
+	}()
 
 	// Send response immediately
 	return pv.SendPathResponse(challengeData, fromAddr)
