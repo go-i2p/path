@@ -27,6 +27,13 @@ const RelayResponseTokenTTL = 10 * time.Second
 // introducer can never drift from the lifetime the tags themselves get.
 const DefaultRelayTagLifetime = 1 * time.Hour
 
+// DefaultRelayTagsMax bounds the number of live relay tags (PATH-008). Tags are
+// allocated in response to remote relay requests, so an unbounded map is a
+// memory-DoS vector at packet rate. The value is an implementation choice; it is
+// generous relative to the ~65,000-tag birthday-paradox threshold noted in
+// AllocateRelayTag and can be overridden via SetRelayTagsMax.
+const DefaultRelayTagsMax = 65536
+
 // RelayManager manages relay connections and introducer services for NAT traversal.
 // It handles relay tag allocation, introducer registration, and relay request processing.
 //
@@ -50,6 +57,11 @@ type RelayManager struct {
 
 	// pendingSessions maps session ID to pending connection
 	pendingSessions map[uint64]*PendingSession
+
+	// relayTagsMax bounds the number of live relay tags (PATH-008). <=0 means
+	// unbounded. Tags are allocated in response to remote relay requests, so an
+	// unbounded map is a memory-DoS vector at packet rate.
+	relayTagsMax int
 
 	// mutex protects all fields
 	mutex sync.RWMutex
@@ -128,12 +140,22 @@ func NewRelayManager(listener ListenerRef) *RelayManager {
 		introducers:     make([]*IntroducerInfo, 0, 3), // I2P spec allows up to 3
 		relayTags:       make(map[uint32]*RelayTag),
 		pendingSessions: make(map[uint64]*PendingSession),
+		relayTagsMax:    DefaultRelayTagsMax,
 	}
 
 	// BUG-M02 fix: Don't start timer in constructor
 	// Caller must explicitly call Start() to begin cleanup timer
 
 	return rm
+}
+
+// SetRelayTagsMax overrides the PATH-008 cap on live relay tags. max <= 0
+// disables the cap (unbounded). Intended for tests and deployments needing a
+// different bound than DefaultRelayTagsMax.
+func (rm *RelayManager) SetRelayTagsMax(max int) {
+	rm.mutex.Lock()
+	defer rm.mutex.Unlock()
+	rm.relayTagsMax = max
 }
 
 // Start starts the cleanup timer for periodic maintenance.
@@ -383,6 +405,18 @@ func (rm *RelayManager) AllocateRelayTag(addr *net.UDPAddr) (uint32, error) {
 			Errorf("relay manager has been stopped")
 	}
 
+	// PATH-008: bound remote-triggered tag state. Insert-reject when the live-tag
+	// map is full; existing tags are left untouched. A caller mapping this to a
+	// relay request emits the spec "limit exceeded" code (Relay Request 3 /
+	// Relay Response 66).
+	if rm.relayTagsMax > 0 && len(rm.relayTags) >= rm.relayTagsMax {
+		return 0, oops.
+			Code("RELAY_TAGS_LIMIT_EXCEEDED").
+			In("relay_manager").
+			With("max", rm.relayTagsMax).
+			Errorf("relay tag limit exceeded (%d)", rm.relayTagsMax)
+	}
+
 	// BUG-M03 fix: Increased from 3 to 10 to handle birthday paradox at scale.
 	// At ~65,000 active tags, collision probability becomes significant.
 	const maxAttempts = 10
@@ -414,7 +448,7 @@ func (rm *RelayManager) AllocateRelayTag(addr *net.UDPAddr) (uint32, error) {
 
 		rm.relayTags[tag] = &RelayTag{
 			Tag:       tag,
-			ForAddr:   addr,
+			ForAddr:   copyUDPAddr(addr),
 			CreatedAt: time.Now(),
 			ExpiresAt: time.Now().Add(DefaultRelayTagLifetime),
 		}
@@ -431,21 +465,31 @@ func (rm *RelayManager) AllocateRelayTag(addr *net.UDPAddr) (uint32, error) {
 			maxAttempts, len(rm.relayTags), float64(len(rm.relayTags))/float64(1<<32)*100)
 }
 
-// ValidateRelayTag validates that a relay tag is active and matches the specified address.
+// ValidateRelayTag validates that a relay tag is active and matches the specified
+// address.
+//
+// PATH-007: a successful validation CONSUMES the tag (it is deleted), enforcing
+// the spec's "the token must be used immediately" requirement and preventing a
+// captured Relay Request from being replayed. A second validation of the same tag
+// therefore returns false.
 //
 // Parameters:
 //   - tag: Relay tag to validate
 //   - addr: Expected address for the tag
 //
-// Returns true if tag is valid and matches address.
+// Returns true if tag is valid and matches address (and consumes it).
 func (rm *RelayManager) ValidateRelayTag(tag uint32, addr *net.UDPAddr) bool {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "ValidateRelayTag", "tag": tag}).Debug("Validating relay tag")
 	if tag == 0 || addr == nil {
 		return false
 	}
 
-	rm.mutex.RLock()
-	defer rm.mutex.RUnlock()
+	// PATH-007: a relay tag "must be used immediately" per the SSU2 spec, so a
+	// successful validation CONSUMES the tag (single-use). This requires a write
+	// lock to delete the entry, which also makes the check-and-consume atomic —
+	// two concurrent copies of the same Relay Request cannot both succeed.
+	rm.mutex.Lock()
+	defer rm.mutex.Unlock()
 
 	// BUG-007 fix: Return false if stopped
 	if rm.stopped {
@@ -468,7 +512,13 @@ func (rm *RelayManager) ValidateRelayTag(tag uint32, addr *net.UDPAddr) bool {
 	}
 
 	// Check address match (M-01 fix: use addrEqual for IPv4/IPv6 parity)
-	return addrEqual(relayTag.ForAddr, addr)
+	if !addrEqual(relayTag.ForAddr, addr) {
+		return false
+	}
+
+	// PATH-007: consume the tag so a captured Relay Request cannot be replayed.
+	delete(rm.relayTags, tag)
+	return true
 }
 
 // GetRelayTag retrieves relay tag information.
@@ -566,8 +616,8 @@ func (rm *RelayManager) AddPendingSession(sessionID uint64, remoteAddr, introduc
 
 	rm.pendingSessions[sessionID] = &PendingSession{
 		SessionID:      sessionID,
-		RemoteAddr:     remoteAddr,
-		IntroducerAddr: introducerAddr,
+		RemoteAddr:     copyUDPAddr(remoteAddr),
+		IntroducerAddr: copyUDPAddr(introducerAddr),
 		RelayTag:       relayTag,
 		CreatedAt:      time.Now(),
 		Retries:        0,

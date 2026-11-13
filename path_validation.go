@@ -91,6 +91,12 @@ type PathValidator struct {
 	// challenges tracks active path validation attempts by challenge data
 	challenges map[string]*PathChallenge
 
+	// challengesMax bounds the number of concurrent path-validation challenges
+	// (PATH-008). <=0 means unbounded. Challenges are created by both local
+	// initiation and remote Path Challenge messages (attacker-keyed, ~1.3KB
+	// each), so an unbounded map is a memory-DoS vector at packet rate.
+	challengesMax int
+
 	// tokenCache is the optional token cache for invalidation on migration
 	tokenCache TokenCacheAccessor
 
@@ -181,11 +187,32 @@ type PathChallenge struct {
 	// to wake RunPMTUD without polling
 	done chan struct{}
 
+	// doneClosed guards done against a second close. PATH-001 fix: several code
+	// paths close done (response, fail, cleanup, MTU-complete) and HandlePathChallenge
+	// closes the *previous* entry's done before overwriting it. Because a validated
+	// challenge is deleted only later (inside ValidatePath), a duplicate Path
+	// Challenge can reach the overwrite while the old done is already closed, and a
+	// raw close() there panics — with no recover() at the packet-receive seam this
+	// kills the connection/router. Every close now goes through closeChallengeDone,
+	// which is idempotent, so the state-guard gap and the double-close class are both
+	// gone. Guarded by pv.mutex like every other field.
+	doneClosed bool
+
 	// counted is true when this challenge was created by InitiatePathValidation
 	// and therefore incremented activeValidations. Completion paths use it to
 	// decrement the counter exactly once. Challenges created directly via
 	// CreateChallenge (e.g. MTU probes) are not counted.
 	counted bool
+}
+
+// closeDone closes the challenge's done channel exactly once, waking any
+// waiter. It is idempotent: a second call is a no-op. Callers MUST hold
+// pv.mutex. PATH-001 fix — see the doneClosed field for the rationale.
+func (ch *PathChallenge) closeDone() {
+	if ch.done != nil && !ch.doneClosed {
+		close(ch.done)
+		ch.doneClosed = true
+	}
 }
 
 // PathChallengeState represents the state of a path validation attempt.
@@ -241,6 +268,13 @@ const (
 	PathValidationCleanupInterval = 30 * time.Second
 )
 
+// DefaultPathChallengesMax bounds the number of concurrent path-validation
+// challenges (PATH-008). Challenges are created by both local initiation and
+// remote Path Challenge messages (attacker-keyed, ~1.3KB each), so an unbounded
+// map is a memory-DoS vector at packet rate. Implementation choice; overridable
+// via SetPathChallengesMax.
+const DefaultPathChallengesMax = 4096
+
 // MTU probing constants (G-5).
 const (
 	// MinMTU is the minimum MTU for SSU2 (spec-defined floor).
@@ -273,12 +307,22 @@ const MinCongestionWindow = 1280
 func NewPathValidator(conn PathValidationConn) *PathValidator {
 	log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "NewPathValidator"}).Debug("Creating new PathValidator")
 	pv := &PathValidator{
-		conn:       conn,
-		challenges: make(map[string]*PathChallenge),
-		stopCh:     make(chan struct{}),
+		conn:          conn,
+		challenges:    make(map[string]*PathChallenge),
+		challengesMax: DefaultPathChallengesMax,
+		stopCh:        make(chan struct{}),
 	}
 	go pv.cleanupLoop()
 	return pv
+}
+
+// SetPathChallengesMax overrides the PATH-008 cap on concurrent path-validation
+// challenges. max <= 0 disables the cap (unbounded). Intended for tests and for
+// deployments that need a different bound than DefaultPathChallengesMax.
+func (pv *PathValidator) SetPathChallengesMax(max int) {
+	pv.mutex.Lock()
+	defer pv.mutex.Unlock()
+	pv.challengesMax = max
 }
 
 // Stop halts the background cleanup goroutine. Call when the validator is
@@ -443,7 +487,7 @@ func (pv *PathValidator) InitiatePathValidation(newAddr *net.UDPAddr) ([]byte, e
 	now := time.Now()
 	challenge := &PathChallenge{
 		ChallengeData: challengeData,
-		NewAddr:       newAddr,
+		NewAddr:       copyUDPAddr(newAddr),
 		Timestamp:     now,
 		LastSentAt:    now,
 		ResponseTimer: PathResponseBaseTimer,
@@ -454,6 +498,15 @@ func (pv *PathValidator) InitiatePathValidation(newAddr *net.UDPAddr) ([]byte, e
 
 	key := string(challengeData)
 	pv.mutex.Lock()
+	// PATH-008: bound concurrent challenges. Locally initiated, so return an
+	// error rather than silently dropping.
+	if pv.challengesMax > 0 && len(pv.challenges) >= pv.challengesMax {
+		pv.mutex.Unlock()
+		return nil, oops.
+			Code("PATH_CHALLENGES_LIMIT_EXCEEDED").
+			With("max", pv.challengesMax).
+			Errorf("path validation challenge limit exceeded (%d)", pv.challengesMax)
+	}
 	pv.challenges[key] = challenge
 	pv.mutex.Unlock()
 
@@ -533,7 +586,7 @@ func (pv *PathValidator) HandlePathChallenge(block *SSU2Block, fromAddr *net.UDP
 	// Record challenge
 	challenge := &PathChallenge{
 		ChallengeData: challengeData,
-		NewAddr:       fromAddr,
+		NewAddr:       copyUDPAddr(fromAddr),
 		Timestamp:     time.Now(),
 		State:         ChallengeReceived,
 		done:          make(chan struct{}), // BUG-014 fix: signal channel
@@ -551,8 +604,20 @@ func (pv *PathValidator) HandlePathChallenge(block *SSU2Block, fromAddr *net.UDP
 		pv.mutex.Lock()
 		defer pv.mutex.Unlock()
 		// L-4 fix: close old done channel before overwriting to unblock any waiter.
-		if old, exists := pv.challenges[key]; exists && old.done != nil {
-			close(old.done)
+		// PATH-001 fix: closeDone is idempotent, so a duplicate Path Challenge whose
+		// old done was already closed (e.g. validated-but-not-yet-deleted) no longer
+		// panics with close-of-closed-channel.
+		if old, exists := pv.challenges[key]; exists {
+			old.closeDone()
+		} else if pv.challengesMax > 0 && len(pv.challenges) >= pv.challengesMax {
+			// PATH-008: the challenge is keyed by attacker-supplied data, so an
+			// unbounded map is a memory-DoS vector. When full, drop NEW keys (a
+			// re-challenge of an existing key still overwrites above). We still send
+			// the Path Response below — harmless, and it bounds memory without
+			// breaking a legitimate peer that reuses a key already in the map.
+			log.WithFields(logger.Fields{"pkg": "ssu2path", "func": "HandlePathChallenge", "max": pv.challengesMax}).
+				Warn("path challenge limit exceeded; dropping new challenge")
+			return
 		}
 		pv.challenges[key] = challenge
 	}()
@@ -640,9 +705,7 @@ func (pv *PathValidator) HandlePathResponse(block *SSU2Block, fromAddr *net.UDPA
 	challenge.State = ChallengeValidated
 
 	// BUG-014 fix: Signal completion
-	if challenge.done != nil {
-		close(challenge.done)
-	}
+	challenge.closeDone()
 
 	// Update discovered MTU if this was a probe challenge (G-5)
 	if challenge.ProbeSize > 0 && challenge.ProbeSize > pv.discoveredMTU {
@@ -766,9 +829,7 @@ func (pv *PathValidator) FailPath(challengeData []byte, reason error) {
 		}
 		challenge.State = ChallengeFailed
 		// BUG-014 fix: Signal completion
-		if challenge.done != nil {
-			close(challenge.done)
-		}
+		challenge.closeDone()
 		// M-2 fix: delete terminal entry so it does not accumulate indefinitely.
 		delete(pv.challenges, key)
 
@@ -853,9 +914,7 @@ func (pv *PathValidator) CleanupExpired() int {
 			challenge.State = ChallengeFailed
 			// M-03 fix: close done channel so waitForProbeResult is woken up
 			// instead of blocking until its own timer fires.
-			if challenge.done != nil {
-				close(challenge.done)
-			}
+			challenge.closeDone()
 			delete(pv.challenges, id)
 			pv.releaseValidation(challenge)
 			cleaned++
@@ -929,7 +988,7 @@ func (pv *PathValidator) InitiateMTUProbe(addr *net.UDPAddr, size int) ([]byte, 
 	now := time.Now()
 	challenge := &PathChallenge{
 		ChallengeData: challengeData,
-		NewAddr:       addr,
+		NewAddr:       copyUDPAddr(addr),
 		Timestamp:     now,
 		LastSentAt:    now,
 		ResponseTimer: PathResponseBaseTimer,
@@ -939,6 +998,15 @@ func (pv *PathValidator) InitiateMTUProbe(addr *net.UDPAddr, size int) ([]byte, 
 	}
 
 	pv.mutex.Lock()
+	// PATH-008: bound concurrent challenges. Locally initiated, so return an
+	// error rather than silently dropping.
+	if pv.challengesMax > 0 && len(pv.challenges) >= pv.challengesMax {
+		pv.mutex.Unlock()
+		return nil, oops.
+			Code("PATH_CHALLENGES_LIMIT_EXCEEDED").
+			With("max", pv.challengesMax).
+			Errorf("path validation challenge limit exceeded (%d)", pv.challengesMax)
+	}
 	pv.challenges[key] = challenge
 	pv.mutex.Unlock()
 
@@ -972,9 +1040,7 @@ func (pv *PathValidator) CompleteMTUProbe(challengeData []byte) {
 		pv.discoveredMTU = challenge.ProbeSize
 	}
 	// BUG-014 fix: Signal completion
-	if challenge.done != nil {
-		close(challenge.done)
-	}
+	challenge.closeDone()
 	// M-1 fix: delete terminal MTU probe entry to prevent memory leak.
 	delete(pv.challenges, key)
 }

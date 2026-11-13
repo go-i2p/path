@@ -224,15 +224,23 @@ func DecodePeerTestBlock(ssu2Block *SSU2Block) (*PeerTestBlock, error) {
 		return nil, oops.Errorf("reject code %d not allowed in PeerTest message %d (only messages 3 and 4 may carry a reject code)", block.Code, block.MessageCode)
 	}
 
-	off, err := block.decodeRouterHash(rawData, off)
-	if err != nil {
-		return nil, err
+	// PATH-006 fix: the 32-byte router hash for messages 2 and 4 is OPTIONAL. The
+	// SSU2 spec permits the "same signed data without the hash" variant that i2pd
+	// emits, so the decoder must accept both forms. For messages 1-4 the signature
+	// is a mandatory trailing 64 bytes, so the router-hash presence is uniquely
+	// determined by the remaining length: with a hash the tail is
+	// 32 + signedFields + 64, without it the tail is signedFields + 64 (signedFields
+	// is 16 for IPv4 / 28 for IPv6). These four totals are distinct, so we can
+	// decide deterministically instead of guessing from a byte value.
+	if block.hasRouterHash() {
+		off = block.decodeRouterHashOptional(rawData, off)
 	}
 
 	// Per SSU2 spec (PeerTest block): "All zeros (fake hash) in message 4 if
 	// rejected by Bob." A reject code of 1-63 means "rejected by Bob", so the
-	// router hash in message 4 MUST be all zeros.
-	if block.MessageCode == 4 && block.Code >= 1 && block.Code <= 63 {
+	// router hash in message 4 MUST be all zeros — but only when a hash is present
+	// (the hash-less variant carries no hash to check).
+	if block.MessageCode == 4 && block.Code >= 1 && block.Code <= 63 && block.RouterHash != nil {
 		for _, b := range block.RouterHash {
 			if b != 0 {
 				return nil, oops.Errorf("PeerTest message 4 rejected by Bob (code %d) must carry an all-zeros router hash", block.Code)
@@ -240,7 +248,7 @@ func DecodePeerTestBlock(ssu2Block *SSU2Block) (*PeerTestBlock, error) {
 		}
 	}
 
-	off, err = block.decodeSignedFields(rawData, off)
+	off, err := block.decodeSignedFields(rawData, off)
 	if err != nil {
 		return nil, err
 	}
@@ -266,21 +274,33 @@ func DecodePeerTestBlock(ssu2Block *SSU2Block) (*PeerTestBlock, error) {
 	return block, nil
 }
 
-// decodeRouterHash reads the optional 32-byte router hash for messages 2 and 4.
-// Returns the updated offset.
-func (b *PeerTestBlock) decodeRouterHash(rawData []byte, off int) (int, error) {
-	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "decodeRouterHash", "msg": b.MessageCode, "offset": off, "dataLen": len(rawData)}).Debug("Decoding optional router hash")
-	if !b.hasRouterHash() {
-		return off, nil
+// decodeRouterHashOptional reads the 32-byte router hash for messages 2 and 4,
+// which is optional per the SSU2 spec (the "same signed data without hash"
+// variant is permitted). It decides presence from the remaining byte count:
+// the trailing signature is a mandatory 64 bytes for these messages, and the
+// signed fields are 16 (IPv4) or 28 (IPv6) bytes, so a tail of
+// 32+16+64 / 32+28+64 means a hash is present and 16+64 / 28+64 means absent.
+// Returns the updated offset (unchanged when no hash is present).
+// PATH-006 fix.
+func (b *PeerTestBlock) decodeRouterHashOptional(rawData []byte, off int) int {
+	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "decodeRouterHashOptional", "msg": b.MessageCode, "offset": off, "dataLen": len(rawData)}).Debug("Decoding optional router hash")
+	// Bytes after the (optional) hash: signedFields + mandatory 64-byte signature.
+	// signedFields is 16 (IPv4) or 28 (IPv6). A hash is present iff the remaining
+	// length is at least 32 bytes more than the smallest hash-less tail (16+64=80)
+	// and matches 32 + {16,28} + 64.
+	remaining := len(rawData) - off
+	hashPresent := remaining == 32+16+64 || remaining == 32+28+64
+	if !hashPresent {
+		return off
 	}
 	if len(rawData) < off+32 {
-		return off, oops.Errorf("PeerTest block too short for router hash: %d bytes", len(rawData))
+		return off
 	}
 	var rh [32]byte
 	copy(rh[:], rawData[off:off+32])
 	h := data.NewHash(rh)
 	b.RouterHash = &h
-	return off + 32, nil
+	return off + 32
 }
 
 // decodeSignedFields reads version, nonce, timestamp, asz, port, and IP.

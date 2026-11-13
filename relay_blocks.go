@@ -449,12 +449,21 @@ func decodeRelayResponseCharlieRejection(resp *RelayResponseBlock, data []byte) 
 	if err != nil {
 		return nil, err
 	}
-	// Signature is mandatory: 64 bytes for Ed25519 (per SSU2 spec).
-	if len(data) < off+64 {
-		return nil, oops.Errorf("Charlie rejection RelayResponse too short for signature: need %d, have %d", off+64, len(data))
+	// PATH-005 fix: the Charlie signature is normally 64 bytes (Ed25519), but the
+	// spec permits a compact "reject, source and reason unspecified" (code 128)
+	// with NO signature — the form i2pd emits. Accept both: read the signature
+	// when a full 64 bytes remain, accept a signature-less rejection when nothing
+	// remains, and reject only a truncated (partial) signature.
+	remaining := len(data) - off
+	switch {
+	case remaining == 0:
+		// Signature-less rejection (e.g. i2pd's compact code-128). Leave Signature nil.
+	case remaining >= 64:
+		resp.Signature = make([]byte, 64)
+		copy(resp.Signature, data[off:off+64])
+	default:
+		return nil, oops.Errorf("Charlie rejection RelayResponse has a truncated signature: %d bytes after endpoint (want 0 or >=64)", remaining)
 	}
-	resp.Signature = make([]byte, 64)
-	copy(resp.Signature, data[off:off+64])
 	return resp, nil
 }
 

@@ -127,6 +127,29 @@ func verifyData(publicKey ed25519.Ed25519PublicKey, data, signature []byte) bool
 	return verifier.Verify(data, signature) == nil
 }
 
+// copyUDPAddr returns a deep copy of the given *net.UDPAddr, or nil if addr is
+// nil. The IP byte slice is copied so the returned address shares no memory
+// with the input.
+//
+// PATH-003 fix: managers that store a caller-supplied *net.UDPAddr (relay tags,
+// pending sessions, hole-punch attempts) MUST deep-copy it. Callers — typically
+// the UDP listener — commonly reuse the *net.UDPAddr returned by ReadFromUDP for
+// the next packet, so storing the pointer by alias lets a later read mutate the
+// stored endpoint outside the manager's lock. That is a data race with the
+// under-lock deep-copy readers, and a torn endpoint can make ValidateRelayTag
+// accept the wrong peer. Copying on the write side closes the race.
+func copyUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
+	if addr == nil {
+		return nil
+	}
+	copied := *addr
+	if addr.IP != nil {
+		copied.IP = make(net.IP, len(addr.IP))
+		copy(copied.IP, addr.IP)
+	}
+	return &copied
+}
+
 // addrEqual reports whether two *net.UDPAddr values refer to the same endpoint.
 // M-01 fix: uses net.IP.Equal instead of String comparison so that an IPv4
 // address (203.0.113.1) and its IPv4-in-IPv6 form (::ffff:203.0.113.1) are

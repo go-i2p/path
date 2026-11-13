@@ -93,3 +93,21 @@ type TestResult struct {
 	// IPConsistent indicates if external IP is consistent
 	IPConsistent bool
 }
+
+// clone returns a deep copy of the TestResult so the caller and the manager
+// never share the ExternalAddr pointer.
+//
+// PATH-004 fix: CompleteTest receives a caller-owned *TestResult and caches it
+// by remote address. Storing the pointer by alias lets the caller mutate the
+// cached result concurrently with GetResult/CleanupExpired reads (a data race),
+// and makes results silently mutable by their owner. Cloning on store fixes both.
+func (r *TestResult) clone() *TestResult {
+	if r == nil {
+		return nil
+	}
+	copied := *r
+	if r.ExternalAddr != nil {
+		copied.ExternalAddr = copyUDPAddr(r.ExternalAddr)
+	}
+	return &copied
+}

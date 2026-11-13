@@ -12,6 +12,12 @@ import (
 	"github.com/samber/oops"
 )
 
+// DefaultPeerTestsMax bounds the number of concurrent peer tests (PATH-008).
+// Tests are created in response to remote PeerTest messages, so an unbounded map
+// is a memory-DoS vector at packet rate. Implementation choice; overridable via
+// SetPeerTestsMax.
+const DefaultPeerTestsMax = 4096
+
 // PeerTestManager manages the seven-message NAT traversal testing protocol.
 // It coordinates peer tests to determine NAT type and external reachability.
 //
@@ -45,6 +51,11 @@ type PeerTestManager struct {
 	// yet known at CompleteTest time. Keyed by nonce; re-keyed to results by
 	// address when SetAliceAddr is called (BUG-001 fix).
 	pendingResults map[uint32]*TestResult
+
+	// testsMax bounds the number of concurrent peer tests (PATH-008). <=0 means
+	// unbounded. Tests are created in response to remote PeerTest messages, so an
+	// unbounded map is a memory-DoS vector at packet rate.
+	testsMax int
 
 	// mutex protects all fields
 	mutex sync.RWMutex
@@ -194,6 +205,7 @@ func NewPeerTestManager(listener ListenerRef) *PeerTestManager {
 		tests:          make(map[uint32]*PeerTest),
 		results:        make(map[string]*TestResult),
 		pendingResults: make(map[uint32]*TestResult),
+		testsMax:       DefaultPeerTestsMax,
 		stopCh:         make(chan struct{}),
 	}
 	go ptm.cleanupLoop()
@@ -204,6 +216,14 @@ func NewPeerTestManager(listener ListenerRef) *PeerTestManager {
 // no longer needed to avoid goroutine leaks. Safe to call multiple times.
 func (ptm *PeerTestManager) Stop() {
 	ptm.stopOnce.Do(func() { close(ptm.stopCh) })
+}
+
+// SetPeerTestsMax overrides the PATH-008 cap on concurrent peer tests. max <= 0
+// disables the cap (unbounded).
+func (ptm *PeerTestManager) SetPeerTestsMax(max int) {
+	ptm.mutex.Lock()
+	defer ptm.mutex.Unlock()
+	ptm.testsMax = max
 }
 
 // cleanupLoop periodically removes expired peer tests.
@@ -258,6 +278,15 @@ func (ptm *PeerTestManager) InitiatePeerTest(bobAddr *net.UDPAddr) (uint32, erro
 	ptm.mutex.Lock()
 	defer ptm.mutex.Unlock()
 
+	// PATH-008: bound concurrent peer tests. Insert-reject when full.
+	if ptm.testsMax > 0 && len(ptm.tests) >= ptm.testsMax {
+		return 0, oops.
+			Code("PEER_TESTS_LIMIT_EXCEEDED").
+			In("peertest_manager").
+			With("max", ptm.testsMax).
+			Errorf("peer test limit exceeded (%d)", ptm.testsMax)
+	}
+
 	// Retry nonce generation on collision (extremely unlikely but safe).
 	// M-02 fix: skip zero by retrying instead of substituting 1, so that
 	// value 1 retains the same probability as every other non-zero nonce.
@@ -308,7 +337,7 @@ func (ptm *PeerTestManager) InitiatePeerTest(bobAddr *net.UDPAddr) (uint32, erro
 		SrcConnectionID:  srcConnID,
 		Role:             RoleInitiator,
 		State:            TestRequested,
-		BobAddr:          bobAddr,
+		BobAddr:          copyUDPAddr(bobAddr),
 		StartTime:        time.Now(),
 		Deadline:         time.Now().Add(60 * time.Second), // 60 s (implementation choice; not mandated by spec)
 	}
@@ -447,14 +476,16 @@ func (ptm *PeerTestManager) CompleteTest(nonce uint32, result *TestResult) error
 	test.State = TestComplete
 	test.NATType = result.NATType
 	test.Reachable = result.Reachable
-	test.ExternalAddr = result.ExternalAddr
+	test.ExternalAddr = copyUDPAddr(result.ExternalAddr)
 
 	// Store result by address if available; otherwise hold under nonce until
-	// SetAliceAddr provides the address key (BUG-001 fix).
+	// SetAliceAddr provides the address key (BUG-001 fix). Clone the caller's
+	// result so the manager and the caller never share the same pointer
+	// (PATH-004 fix).
 	if test.AliceAddr != nil {
-		ptm.results[test.AliceAddr.String()] = result
+		ptm.results[test.AliceAddr.String()] = result.clone()
 	} else {
-		ptm.pendingResults[nonce] = result
+		ptm.pendingResults[nonce] = result.clone()
 	}
 
 	return nil
@@ -662,6 +693,15 @@ func (ptm *PeerTestManager) CreateRelayTest(nonce uint32, aliceAddr, charlieAddr
 	ptm.mutex.Lock()
 	defer ptm.mutex.Unlock()
 
+	// PATH-008: bound concurrent peer tests. Insert-reject when full.
+	if ptm.testsMax > 0 && len(ptm.tests) >= ptm.testsMax {
+		return 0, oops.
+			Code("PEER_TESTS_LIMIT_EXCEEDED").
+			In("peertest_manager").
+			With("max", ptm.testsMax).
+			Errorf("peer test limit exceeded (%d)", ptm.testsMax)
+	}
+
 	// FIX-3.1: Check for nonce collision before storing.
 	// External nonces (from Alice) can collide with existing tests.
 	// Reject if nonce already in use to prevent state machine violation.
@@ -678,8 +718,8 @@ func (ptm *PeerTestManager) CreateRelayTest(nonce uint32, aliceAddr, charlieAddr
 		Nonce:       nonce,
 		Role:        RoleRelay,
 		State:       TestRelayed,
-		AliceAddr:   aliceAddr,
-		CharlieAddr: charlieAddr,
+		AliceAddr:   copyUDPAddr(aliceAddr),
+		CharlieAddr: copyUDPAddr(charlieAddr),
 		StartTime:   time.Now(),
 		Deadline:    time.Now().Add(60 * time.Second),
 	}
@@ -737,6 +777,15 @@ func (ptm *PeerTestManager) CreateResponderTest(nonce uint32, aliceAddr, bobAddr
 	ptm.mutex.Lock()
 	defer ptm.mutex.Unlock()
 
+	// PATH-008: bound concurrent peer tests. Insert-reject when full.
+	if ptm.testsMax > 0 && len(ptm.tests) >= ptm.testsMax {
+		return oops.
+			Code("PEER_TESTS_LIMIT_EXCEEDED").
+			In("peertest_manager").
+			With("max", ptm.testsMax).
+			Errorf("peer test limit exceeded (%d)", ptm.testsMax)
+	}
+
 	// FIX-3.1: Check for nonce collision before storing.
 	// External nonces (from Bob) can collide with existing tests.
 	// Reject if nonce already in use to prevent state machine violation.
@@ -753,8 +802,8 @@ func (ptm *PeerTestManager) CreateResponderTest(nonce uint32, aliceAddr, bobAddr
 		Nonce:     nonce,
 		Role:      RoleResponder,
 		State:     TestProbed,
-		AliceAddr: aliceAddr,
-		BobAddr:   bobAddr,
+		AliceAddr: copyUDPAddr(aliceAddr),
+		BobAddr:   copyUDPAddr(bobAddr),
 		StartTime: time.Now(),
 		Deadline:  time.Now().Add(60 * time.Second),
 	}
@@ -788,7 +837,7 @@ func (ptm *PeerTestManager) SetAliceAddr(nonce uint32, addr *net.UDPAddr) error 
 			Errorf("alice address has invalid source port %d", addr.Port)
 	}
 	return ptm.withTest(nonce, func(test *PeerTest) {
-		test.AliceAddr = addr
+		test.AliceAddr = copyUDPAddr(addr)
 		// BUG-001 fix: re-key any pending result from nonce to address now that
 		// Alice's address is known.
 		if pending, ok := ptm.pendingResults[nonce]; ok {
@@ -840,7 +889,7 @@ func (ptm *PeerTestManager) SetTestAliceAddr(nonce uint32, addr *net.UDPAddr) {
 	ptm.mutex.Lock()
 	defer ptm.mutex.Unlock()
 	if test, exists := ptm.tests[nonce]; exists {
-		test.AliceAddr = addr
+		test.AliceAddr = copyUDPAddr(addr)
 	}
 }
 

@@ -21,6 +21,17 @@ type PendingSessionRegistry interface {
 	RemovePendingSession(sessionID uint64)
 }
 
+// PATH-008: bounds on remote-triggered coordinator state. Both are reachable at
+// packet rate (InitiateHolePunch creates attempts; incoming Hole Punches populate
+// the replay cache), so unbounded growth is a memory-DoS vector. Defaults are
+// generous enough for normal operation and can be overridden via setters.
+const (
+	// DefaultHolePunchAttemptsMax bounds concurrent hole-punch attempts.
+	DefaultHolePunchAttemptsMax = 4096
+	// DefaultHolePunchReplayCacheSize bounds the PATH-007 replay cache.
+	DefaultHolePunchReplayCacheSize = 8192
+)
+
 // HolePunchVerifyContext carries the peer identities needed to reconstruct the
 // signed RelayIntro payload for verification. The implementer resolves them
 // from session state available at the call site.
@@ -37,8 +48,10 @@ type HolePunchVerifyContext struct {
 // HolePunchVerifyInfo describes an incoming hole-punch message and the
 // coordinator state associated with it. It is passed to the
 // HolePunchContextResolver so implementations can map addresses to peer
-// identities without querying the coordinator (which would deadlock: the
-// coordinator mutex is held during verification).
+// identities. Since the PATH-002 fix the coordinator mutex is NOT held while
+// the resolver runs, so a resolver may safely call back into the coordinator
+// (e.g. GetAttempt); the addresses it needs are provided here so it usually
+// does not need to.
 type HolePunchVerifyInfo struct {
 	// SessionID is the hole-punch session identifier.
 	SessionID uint64
@@ -105,6 +118,18 @@ type HolePunchCoordinator struct {
 	// cryptographically. This field is set at construction and is immutable
 	// to prevent misconfiguration.
 	resolveVerifyContext HolePunchContextResolver
+
+	// replay suppresses duplicate Hole Punch / Relay Response messages
+	// (PATH-007). Signature + the ±MaxClockSkew window bound a message's age but
+	// not its uniqueness, so a captured message was previously re-accepted for
+	// ~10 min. Keyed by the message signature (unique per message), TTL 2×skew.
+	// Thread-safe; consulted on the unlocked verify path.
+	replay *replayCache
+
+	// attemptsMax bounds the number of concurrent hole-punch attempts
+	// (PATH-008). <=0 means unbounded. Remote-triggered via InitiateHolePunch,
+	// so an unbounded map is a memory-DoS vector at packet rate.
+	attemptsMax int
 
 	// stopCh is closed by Stop() to signal the cleanup goroutine to exit.
 	stopCh chan struct{}
@@ -203,6 +228,8 @@ func NewHolePunchCoordinator(manager PendingSessionRegistry, resolveVerifyContex
 		manager:              manager,
 		attempts:             make(map[uint64]*HolePunchAttempt),
 		resolveVerifyContext: resolveVerifyContext,
+		replay:               newReplayCache(2*MaxClockSkew, DefaultHolePunchReplayCacheSize),
+		attemptsMax:          DefaultHolePunchAttemptsMax,
 		stopCh:               make(chan struct{}),
 	}
 	go hpc.cleanupLoop()
@@ -213,6 +240,24 @@ func NewHolePunchCoordinator(manager PendingSessionRegistry, resolveVerifyContex
 // is no longer needed to avoid goroutine leaks. Safe to call multiple times.
 func (hpc *HolePunchCoordinator) Stop() {
 	hpc.stopOnce.Do(func() { close(hpc.stopCh) })
+}
+
+// SetHolePunchAttemptsMax overrides the PATH-008 cap on concurrent hole-punch
+// attempts. max <= 0 disables the cap (unbounded).
+func (hpc *HolePunchCoordinator) SetHolePunchAttemptsMax(max int) {
+	hpc.mutex.Lock()
+	defer hpc.mutex.Unlock()
+	hpc.attemptsMax = max
+}
+
+// SetReplayCacheSize overrides the PATH-007 replay-cache bound. max <= 0
+// disables replay suppression entirely. Mutates the existing cache under its own
+// lock rather than replacing the pointer, so it is safe against the unlocked
+// verify-path reads.
+func (hpc *HolePunchCoordinator) SetReplayCacheSize(max int) {
+	if hpc.replay != nil {
+		hpc.replay.setMax(max)
+	}
 }
 
 // cleanupLoop periodically removes expired hole punch attempts.
@@ -294,6 +339,17 @@ func (hpc *HolePunchCoordinator) InitiateHolePunch(remoteAddr, introducerAddr *n
 	hpc.mutex.Lock()
 	defer hpc.mutex.Unlock()
 
+	// PATH-008: bound remote-triggered attempt state. InitiateHolePunch is
+	// reachable at packet rate, so an unbounded attempts map is a memory-DoS
+	// vector. Insert-reject when full (existing attempts are left untouched).
+	if hpc.attemptsMax > 0 && len(hpc.attempts) >= hpc.attemptsMax {
+		return 0, oops.
+			Code("ATTEMPTS_LIMIT_EXCEEDED").
+			In("holepunch_coordinator").
+			With("max", hpc.attemptsMax).
+			Errorf("hole punch attempt limit exceeded (%d)", hpc.attemptsMax)
+	}
+
 	for attempt := 0; attempt < maxSessionIDRetries; attempt++ {
 		var sessionIDBuf [8]byte
 		if _, err := rand.Read(sessionIDBuf[:]); err != nil {
@@ -322,8 +378,8 @@ func (hpc *HolePunchCoordinator) InitiateHolePunch(remoteAddr, introducerAddr *n
 	// Create attempt
 	attempt := &HolePunchAttempt{
 		SessionID:  destConnID,
-		RemoteAddr: remoteAddr,
-		Introducer: introducerAddr,
+		RemoteAddr: copyUDPAddr(remoteAddr),
+		Introducer: copyUDPAddr(introducerAddr),
 		State:      HolePunchRequested,
 		StartTime:  time.Now(),
 		Retries:    0,
@@ -416,8 +472,13 @@ func (hpc *HolePunchCoordinator) SendHolePunch(sessionID uint64, targetAddr *net
 // the message is rejected (fail-closed). The resolved context is then used to
 // reconstruct the signed payload and verify the signature.
 //
-// Must be called with hpc.mutex held (the attempt is read by the caller).
-func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, fromAddr *net.UDPAddr, attempt *HolePunchAttempt, block *RelayResponseBlock) error {
+// PATH-002 fix: this runs WITHOUT hpc.mutex held. remoteAddr/introducerAddr are
+// caller-supplied snapshots of the attempt's addresses, so the resolver and the
+// CPU-bound Ed25519 verify never run under the coordinator lock. Previously they
+// did, which meant a caller-supplied resolver that re-entered the coordinator
+// (e.g. calling GetAttempt) deadlocked forever, and any slow resolver
+// head-of-line-blocked every other hole-punch behind it.
+func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, fromAddr, remoteAddr, introducerAddr *net.UDPAddr, block *RelayResponseBlock) error {
 	if block == nil {
 		log.WithFields(logger.Fields{
 			"pkg":        "ssu2",
@@ -432,13 +493,11 @@ func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, from
 	}
 
 	info := HolePunchVerifyInfo{
-		SessionID: sessionID,
-		FromAddr:  fromAddr,
-		Block:     block,
-	}
-	if attempt != nil {
-		info.RemoteAddr = attempt.RemoteAddr
-		info.IntroducerAddr = attempt.Introducer
+		SessionID:      sessionID,
+		FromAddr:       fromAddr,
+		RemoteAddr:     remoteAddr,
+		IntroducerAddr: introducerAddr,
+		Block:          block,
 	}
 
 	ctx, signerKey, ok := hpc.resolveVerifyContext(info)
@@ -478,6 +537,19 @@ func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, from
 			With("session_id", sessionID).
 			Errorf("hole punch signature invalid")
 	}
+
+	// PATH-007: the signature is valid, so the message is authentic. Reject an
+	// exact replay — a message whose signature we have already accepted within the
+	// skew window. Keyed by the signature bytes (unique per message), so a genuine
+	// retransmit (fresh signature) is never suppressed. Checked only after
+	// verification so an unauthenticated packet cannot poison the cache.
+	if hpc.replay != nil && hpc.replay.checkAndRecord(string(block.Signature)) {
+		return oops.
+			Code("REPLAY_DETECTED").
+			In("holepunch_coordinator").
+			With("session_id", sessionID).
+			Errorf("hole punch replay detected - signature already accepted within the skew window")
+	}
 	return nil
 }
 
@@ -498,15 +570,32 @@ func (hpc *HolePunchCoordinator) verifyHolePunchSignature(sessionID uint64, from
 // BUG-M03 fix: Clarified that block parameter cannot be nil.
 func (hpc *HolePunchCoordinator) HandleHolePunch(sessionID uint64, fromAddr *net.UDPAddr, block *RelayResponseBlock) error {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "HandleHolePunch", "sessionID": sessionID}).Debug("Handling hole punch")
-	hpc.mutex.Lock()
-	defer hpc.mutex.Unlock()
 
+	// Phase 1 (locked): validate the session and snapshot the verify inputs.
+	// PATH-002 fix: the snapshot lets the resolver + Ed25519 verify run without
+	// hpc.mutex, so a re-entrant or slow resolver can neither deadlock the
+	// coordinator nor head-of-line-block other hole-punch handling.
+	hpc.mutex.Lock()
 	attempt, err := hpc.lookupAttempt(sessionID, fromAddr, "from")
 	if err != nil {
+		hpc.mutex.Unlock()
+		return err
+	}
+	remoteAddr := copyUDPAddr(attempt.RemoteAddr)
+	introducerAddr := copyUDPAddr(attempt.Introducer)
+	hpc.mutex.Unlock()
+
+	// Phase 2 (unlocked): resolve the signer context and verify the signature.
+	if err := hpc.verifyHolePunchSignature(sessionID, fromAddr, remoteAddr, introducerAddr, block); err != nil {
 		return err
 	}
 
-	if err := hpc.verifyHolePunchSignature(sessionID, fromAddr, attempt, block); err != nil {
+	// Phase 3 (locked): re-apply the state transition. The attempt may have aged
+	// out during verification, so re-look it up and only mutate if it still exists.
+	hpc.mutex.Lock()
+	defer hpc.mutex.Unlock()
+	attempt, err = hpc.lookupAttempt(sessionID, fromAddr, "from")
+	if err != nil {
 		return err
 	}
 
@@ -522,7 +611,7 @@ func (hpc *HolePunchCoordinator) HandleHolePunch(sessionID uint64, fromAddr *net
 			"pkg": "ssu2", "func": "HandleHolePunch", "sessionID": sessionID,
 			"reported_port": block.CharliePort, "source_port": fromAddr.Port,
 		}).Info("Hole Punch UDP source port differs from reported port; using source port (symmetric NAT)")
-		attempt.RemoteAddr = &net.UDPAddr{IP: fromAddr.IP, Port: fromAddr.Port}
+		attempt.RemoteAddr = copyUDPAddr(fromAddr)
 	}
 
 	attempt.State = HolePunchWaiting
@@ -545,15 +634,30 @@ func (hpc *HolePunchCoordinator) HandleHolePunch(sessionID uint64, fromAddr *net
 // BUG-M03 fix: Clarified that block parameter cannot be nil.
 func (hpc *HolePunchCoordinator) ProcessHolePunchResponse(sessionID uint64, addr *net.UDPAddr, block *RelayResponseBlock) error {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "ProcessHolePunchResponse", "sessionID": sessionID}).Debug("Processing hole punch response")
-	hpc.mutex.Lock()
-	defer hpc.mutex.Unlock()
 
+	// Phase 1 (locked): validate the session and snapshot the verify inputs.
+	// PATH-002 fix: see HandleHolePunch — resolver + verify run without the lock.
+	hpc.mutex.Lock()
 	attempt, err := hpc.lookupAttempt(sessionID, addr, "response")
 	if err != nil {
+		hpc.mutex.Unlock()
+		return err
+	}
+	remoteAddr := copyUDPAddr(attempt.RemoteAddr)
+	introducerAddr := copyUDPAddr(attempt.Introducer)
+	hpc.mutex.Unlock()
+
+	// Phase 2 (unlocked): resolve the signer context and verify the signature.
+	if err := hpc.verifyHolePunchSignature(sessionID, addr, remoteAddr, introducerAddr, block); err != nil {
 		return err
 	}
 
-	if err := hpc.verifyHolePunchSignature(sessionID, addr, attempt, block); err != nil {
+	// Phase 3 (locked): re-look up the attempt (it may have aged out during
+	// verification) and apply the transition only if it still exists.
+	hpc.mutex.Lock()
+	defer hpc.mutex.Unlock()
+	attempt, err = hpc.lookupAttempt(sessionID, addr, "response")
+	if err != nil {
 		return err
 	}
 
@@ -587,7 +691,7 @@ func (hpc *HolePunchCoordinator) ProcessHolePunchResponse(sessionID uint64, addr
 			"pkg": "ssu2", "func": "ProcessHolePunchResponse", "sessionID": sessionID,
 			"reported_port": block.CharliePort, "source_port": addr.Port,
 		}).Info("Hole Punch UDP source port differs from reported port; using source port (symmetric NAT)")
-		attempt.RemoteAddr = &net.UDPAddr{IP: addr.IP, Port: addr.Port}
+		attempt.RemoteAddr = copyUDPAddr(addr)
 	}
 
 	// Mark as successful
