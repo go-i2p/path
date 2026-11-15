@@ -522,3 +522,78 @@ func TestReplayCache_Disabled(t *testing.T) {
 	assert.False(t, c.checkAndRecord("z"))
 	assert.True(t, c.checkAndRecord("z"), "re-enabled cache reports replays")
 }
+
+// PATH-101 (complete): shrinking the bound below current occupancy must enforce
+// the new max immediately (free memory), not linger until TTL expiry.
+func TestReplayCache_ShrinkEnforcesBound(t *testing.T) {
+	now := time.Now()
+	c := newReplayCache(time.Hour, 10)
+	c.nowFunc = func() time.Time { return now }
+
+	for i := 0; i < 10; i++ {
+		c.checkAndRecord(string(rune('a' + i)))
+	}
+	c.mu.Lock()
+	full := len(c.seen)
+	c.mu.Unlock()
+	require.Equal(t, 10, full, "cache should be full at max=10")
+
+	// Shrink the bound; the map must trim to the new max at once.
+	c.setMax(3)
+	c.mu.Lock()
+	afterShrink := len(c.seen)
+	c.mu.Unlock()
+	require.LessOrEqual(t, afterShrink, 3, "setMax must trim occupancy to the new bound")
+
+	// And it must stay bounded under continued inserts.
+	for i := 0; i < 20; i++ {
+		c.checkAndRecord(string(rune('A' + i)))
+	}
+	c.mu.Lock()
+	afterInserts := len(c.seen)
+	c.mu.Unlock()
+	require.LessOrEqual(t, afterInserts, 3, "bound must hold after setMax shrink + inserts")
+
+	// The most-recently-seen entries survive the trim (approximate LRU keeps the
+	// freshest), so the last insert is still reported as a replay.
+	assert.True(t, c.checkAndRecord(string(rune('A'+19))), "freshest entry survives shrink")
+}
+
+// PATH-101: concurrent setMax + checkAndRecord must not race on c.max nor panic
+// on a nil c.seen. Run with -race to catch the unsynced read; the recover-free
+// goroutines also surface the nil-map insert panic if the enable/disable
+// decision is made outside the lock.
+func TestReplayCache_ConcurrentSetMaxNoRaceNoPanic(t *testing.T) {
+	c := newReplayCache(time.Hour, 8)
+	var wg sync.WaitGroup
+	const rounds = 2000
+
+	// Writers flipping the bound across the enable/disable boundary.
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			c.setMax(i % 4) // 0 disables (nils the map), 1..3 enables
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			c.setMax(8)
+		}
+	}()
+
+	// Readers on the verify path, which must never panic regardless of the
+	// interleaving with the writers above.
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < rounds; i++ {
+				_ = c.checkAndRecord(string(rune('a' + (i%26) + id)))
+			}
+		}(r)
+	}
+
+	wg.Wait()
+}

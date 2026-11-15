@@ -50,11 +50,19 @@ func newReplayCache(ttl time.Duration, max int) *replayCache {
 // is performed atomically under the lock to avoid a TOCTOU race between two
 // concurrent copies of the same message.
 func (c *replayCache) checkAndRecord(key string) bool {
-	if c == nil || c.max <= 0 {
-		return false // cache disabled
+	if c == nil {
+		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Decide enable/disable *inside* the lock: c.max and c.seen are mutated by
+	// setMax under the same lock, so reading them here (rather than in a
+	// pre-lock guard) avoids both a data race on c.max and a TOCTOU window where
+	// setMax(<=0) could nil c.seen between the guard and the insert below.
+	if c.max <= 0 || c.seen == nil {
+		return false // cache disabled
+	}
 
 	now := c.nowFunc()
 	if exp, ok := c.seen[key]; ok && now.Before(exp) {
@@ -66,7 +74,10 @@ func (c *replayCache) checkAndRecord(key string) bool {
 
 // setMax overrides the cache bound. max <= 0 disables the cache (and frees the
 // backing map); max > 0 enables it, allocating the map if it was previously
-// disabled. Safe to call concurrently with checkAndRecord.
+// disabled. When the bound shrinks below the current occupancy the map is
+// trimmed immediately so the new max is enforced at once and memory is freed,
+// rather than lingering until TTL expiry. Safe to call concurrently with
+// checkAndRecord.
 func (c *replayCache) setMax(max int) {
 	if c == nil {
 		return
@@ -74,15 +85,24 @@ func (c *replayCache) setMax(max int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.max = max
-	if max > 0 && c.seen == nil {
-		c.seen = make(map[string]time.Time, min(max, 64))
-	} else if max <= 0 {
+	switch {
+	case max <= 0:
 		c.seen = nil
+	case c.seen == nil:
+		c.seen = make(map[string]time.Time, min(max, 64))
+	default:
+		// Bound shrank below current occupancy: evict down to the new max now.
+		for len(c.seen) > max {
+			if !c.evictOldest() {
+				break
+			}
+		}
 	}
 }
 
 // insert records key with an expiry of now+ttl, evicting expired entries and,
-// if still over capacity, the oldest entry. Caller must hold c.mu.
+// if still at or over capacity, enough of the oldest entries to make room. It
+// guarantees len(c.seen) <= c.max on return. Caller must hold c.mu.
 func (c *replayCache) insert(key string, now time.Time) {
 	// Opportunistically drop expired entries to keep the map near its working set.
 	for k, exp := range c.seen {
@@ -90,20 +110,33 @@ func (c *replayCache) insert(key string, now time.Time) {
 			delete(c.seen, k)
 		}
 	}
-	if len(c.seen) >= c.max {
-		// Still full: evict the entry with the earliest expiry (approximate LRU,
-		// since all entries share the same ttl the earliest expiry is the oldest).
-		var oldestKey string
-		var oldestExp time.Time
-		first := true
-		for k, exp := range c.seen {
-			if first || exp.Before(oldestExp) {
-				oldestKey, oldestExp, first = k, exp, false
-			}
-		}
-		if !first {
-			delete(c.seen, oldestKey)
+	// Evict until there is room for the new key. Normally a single iteration;
+	// more only when the map is transiently over capacity (e.g. right after
+	// setMax shrank the bound), which keeps the bound enforced regardless of how
+	// the map got over capacity.
+	for len(c.seen) >= c.max {
+		if !c.evictOldest() {
+			break
 		}
 	}
 	c.seen[key] = now.Add(c.ttl)
+}
+
+// evictOldest removes the entry with the earliest expiry (approximate LRU, since
+// all entries share the same ttl the earliest expiry is the oldest). It returns
+// false when the map is empty. Caller must hold c.mu.
+func (c *replayCache) evictOldest() bool {
+	var oldestKey string
+	var oldestExp time.Time
+	first := true
+	for k, exp := range c.seen {
+		if first || exp.Before(oldestExp) {
+			oldestKey, oldestExp, first = k, exp, false
+		}
+	}
+	if first {
+		return false
+	}
+	delete(c.seen, oldestKey)
+	return true
 }
