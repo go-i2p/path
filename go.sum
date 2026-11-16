@@ -8,8 +8,8 @@ github.com/go-i2p/crypto v0.1.70002-0.20261112185239-abff3605c696 h1:4SeERTXM3mv
 github.com/go-i2p/crypto v0.1.70002-0.20261112185239-abff3605c696/go.mod h1:i1aSJTkQPPIXK0+i9IjyIsaVLeG63v7uXkXKFlRO/z4=
 github.com/go-i2p/elgamal v0.1.70001 h1:VJhHyf2k6wXAUvxTGKp+79RdT6XckcldHeXaOks4f9E=
 github.com/go-i2p/elgamal v0.1.70001/go.mod h1:rLYRtKMa6JbkiYzSkJhfu8kYe+Xadq/l4Hr4tryEE8M=
-github.com/go-i2p/go-noise v0.1.70002-0.20261116074947-70cb2983f689 h1:AHe91aqeDXwWWeIyHdfVlmeE0IY7aKplt98kJ2WNAck=
-github.com/go-i2p/go-noise v0.1.70002-0.20261116074947-70cb2983f689/go.mod h1:oTv504kQkSXDn42JEEnXmB6qLw00fsMbolukp43QJn4=
+github.com/go-i2p/go-noise v0.1.70002-0.20261116190345-2b80604d53b0 h1:c5BL/9qcINXAPH5BeTKW6rJ37rnaiqarsYcYDZ0EyHU=
+github.com/go-i2p/go-noise v0.1.70002-0.20261116190345-2b80604d53b0/go.mod h1:GTerZSiDHyIVHkAR2W71Zi/ake9JtdshKxKSBqMBZWU=
 github.com/go-i2p/logger v0.1.70001 h1:t5Nexs02kO6rwzkXQa5YR9wHKYzjVUw2A7e5gNjupgA=
 github.com/go-i2p/logger v0.1.70001/go.mod h1:EO05RdRNr1CEsVV2mYURSF3eVbnkNLrc+na7D4UPVX4=
 github.com/go-i2p/noise v1.1.70001-0.20261108230905-d8e68b967e5c h1:Wy8kslgmEWh0Yay91IZFwa/wSlrlztM88gVPFfW68mg=
