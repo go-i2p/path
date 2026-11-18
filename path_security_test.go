@@ -365,7 +365,7 @@ func TestRelayResponse_CharlieRejectionI2pdShape(t *testing.T) {
 
 // buildPeerTestRaw assembles PeerTest wire bytes with an optional 32-byte router
 // hash, so the hash-less decode-only leniency can be exercised.
-func buildPeerTestRaw(msg PeerTestMessageCode, code byte, withHash bool, ip net.IP, hash []byte, sig []byte) []byte {
+func buildPeerTestRaw(msg PeerTestMessageCode, code byte, withHash bool, ip net.IP, hash, sig []byte) []byte {
 	var data []byte
 	data = append(data, byte(msg), code, 0x00) // msg, code, flag
 	if withHash {

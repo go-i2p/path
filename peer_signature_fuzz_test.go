@@ -94,7 +94,7 @@ func decodePeerTestArgs(b []byte) (
 	if rest := take(len(b) - pos); len(rest) > 0 {
 		aliceIP = net.IP(append([]byte(nil), rest...))
 	}
-	return
+	return bobHash, aliceHash, version, nonce, timestamp, alicePort, aliceIP
 }
 
 // FuzzPeerTestSignature fuzzes the peer-test sign/verify helpers. The seed
