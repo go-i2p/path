@@ -597,3 +597,50 @@ func TestReplayCache_ConcurrentSetMaxNoRaceNoPanic(t *testing.T) {
 
 	wg.Wait()
 }
+
+// BenchmarkReplayCache_CheckAndRecord measures the PATH-002 hot path: a cache
+// pinned at its default capacity (DefaultHolePunchReplayCacheSize) processing a
+// continuous stream of distinct (non-replay) identifiers. The clock is frozen so
+// nothing expires, which keeps the map full and forces an eviction on every
+// insert — the exact steady-state that the old O(N) implementation paid ~725µs/op
+// for (two full map walks per accepted message). With the PATH-002 FIFO this must
+// drop to sub-microsecond and stay flat as max grows.
+//
+// The key pool is larger than max so every identifier is a fresh miss (never
+// currently resident), exercising the insert+evict path rather than a replay hit.
+func BenchmarkReplayCache_CheckAndRecord(b *testing.B) {
+	const max = DefaultHolePunchReplayCacheSize
+	c := newReplayCache(2*MaxClockSkew, max)
+	now := time.Now()
+	c.nowFunc = func() time.Time { return now }
+
+	// Pre-generate a pool of distinct keys larger than max so the cache stays at
+	// capacity and every op evicts. Key building is excluded from the timing.
+	pool := make([]string, max*2)
+	for i := range pool {
+		pool[i] = string(rune('A' + i%26)) + string(rune('a'+(i/26)%26)) +
+			string(rune('0'+(i/676)%10)) + itoa(i)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = c.checkAndRecord(pool[i%len(pool)])
+	}
+}
+
+// itoa is a tiny decimal formatter for building benchmark keys without pulling
+// strconv into the hot loop of the test file's other helpers.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	pos := len(buf)
+	for n > 0 {
+		pos--
+		buf[pos] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[pos:])
+}
