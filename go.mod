@@ -5,9 +5,9 @@ go 1.26.8
 //replace github.com/go-i2p/go-noise => ../go-noise
 
 require (
-	github.com/go-i2p/common v0.1.70002-0.20261114233851-68e4f56429d3
-	github.com/go-i2p/crypto v0.1.70002-0.20261118040611-eb79cb4ff0f9
-	github.com/go-i2p/go-noise v0.1.70002-0.20261118004034-b9f1378f06b1
+	github.com/go-i2p/common v0.1.70002-0.20261118194241-62f47be3c537
+	github.com/go-i2p/crypto v0.1.70002-0.20261118201949-96ca77ddd35f
+	github.com/go-i2p/go-noise v0.1.70002-0.20261118202006-d63f4ed8a04e
 	github.com/go-i2p/logger v0.1.70001
 	github.com/samber/oops v1.23.1
 	github.com/stretchr/testify v1.12.1
@@ -17,7 +17,7 @@ require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-i2p/elgamal v0.1.70001 // indirect
-	github.com/go-i2p/noise v1.1.70001-0.20261108230905-d8e68b967e5c // indirect
+	github.com/go-i2p/noise v1.1.70001-0.20261118202026-19560feb154e // indirect
 	github.com/oklog/ulid/v2 v2.1.2 // indirect
 	github.com/samber/lo v1.53.0 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect
