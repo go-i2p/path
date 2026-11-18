@@ -132,7 +132,8 @@ type PathValidationConn interface {
 	//
 	// A list rather than a single block is required because the SSU2 spec
 	// pairs the Path Challenge with an Address block carrying the new
-	// IP/port (see §"Initiating Path Validation"), so the correct packet is
+	// IP/port (ssu2.md:3244 "Send a data packet containing a Path Challenge
+	// block, an Address block (containing the new IP/port)"), so the correct packet is
 	// not expressible through a one-block seam. A nil or empty slice is an
 	// error.
 	//
@@ -445,13 +446,13 @@ func (pv *PathValidator) releaseValidation(ch *PathChallenge) {
 // cryptographically random challenge data. The peer must respond with a
 // Path Response (Type 19) containing the same challenge data.
 //
-// Per the SSU2 spec (Connection Migration), path validation is defined only
+// Per the SSU2 spec (Connection Migration, ssu2.md:3205), path validation is defined only
 // for the data phase of a session; it is refused while the handshake is in
 // progress (see the HandshakePhase interface).
 //
 // Cross-address-family migration: the spec states peers "are NOT required to
 // support migration between IPv4 and IPv6, and may treat a new IP in the
-// other address family as invalid." InitiatePathValidation does not itself
+// other address family as invalid" (ssu2.md:3237). InitiatePathValidation does not itself
 // reject a new address in a different IP family than the current remote
 // address; callers that do not wish to support cross-family migration should
 // compare the IP family of newAddr against the current remote address and

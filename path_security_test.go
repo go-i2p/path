@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-i2p/common/data"
 	"github.com/go-i2p/crypto/ed25519"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -249,13 +250,18 @@ func TestPeerTestManager_CompleteTestStoresClone(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// PATH-005: RelayResponse code>=64 with no signature (i2pd compact reject)
+// PATH-005: RelayResponse code>=64 signature handling. The spec requires Charlie
+// to sign every code >= 64 (ssu2.md:2454); i2pd always signs
+// (i2pd/libi2pd/SSU2Session.cpp:3143). A signature-less rejection is a decode-only
+// leniency, never an encoder output.
 // ---------------------------------------------------------------------------
 
-func TestRelayResponse_CharlieRejectionSiglessRoundTrip(t *testing.T) {
-	// A code-128 "reject, source and reason unspecified" with NO signature, as
-	// i2pd emits. Build the wire bytes directly: flag, code, nonce, ts, ver, csz,
-	// endpoint (IPv4: port+4B), then nothing.
+func TestRelayResponse_CharlieRejectionSiglessDecodeLeniency(t *testing.T) {
+	// A code-128 "reject, source and reason unspecified" with NO signature. This
+	// is a DECODE-ONLY leniency: it is neither spec-permitted (ssu2.md:2454) nor
+	// what i2pd emits (i2pd always signs and always writes ts/ver/csz —
+	// i2pd/libi2pd/SSU2Session.cpp:3111, :3128, :3143). Build the wire bytes
+	// directly: flag, code, nonce, ts, ver, csz, endpoint (IPv4: port+4B), nothing.
 	ip := net.ParseIP("203.0.113.90").To4()
 	require.NotNil(t, ip)
 	data := make([]byte, 0, 18)
@@ -268,23 +274,21 @@ func TestRelayResponse_CharlieRejectionSiglessRoundTrip(t *testing.T) {
 
 	block := NewSSU2Block(BlockTypeRelayResponse, data)
 	decoded, err := DecodeRelayResponse(block)
-	require.NoError(t, err, "sig-less code-128 reject must decode (PATH-005)")
+	require.NoError(t, err, "sig-less code-128 reject must decode as a leniency (PATH-005)")
 	assert.Equal(t, byte(128), decoded.Code)
 	assert.Nil(t, decoded.Signature, "sig-less reject must decode with nil signature")
 	assert.True(t, decoded.CharlieIP.Equal(ip))
 
-	// Encoder must emit the compact form when Signature is nil, and it must
-	// round-trip back through the decoder.
+	// The encoder must NOT produce this shape: a code >= 64 rejection with a nil
+	// signature is an error, because the spec requires Charlie's signature for
+	// every code >= 64 (ssu2.md:2454).
 	resp := &RelayResponseBlock{
 		Code: 128, Nonce: 0x11223344, Timestamp: uint32(time.Now().Unix()),
 		Version: 2, CharliePort: 9000, CharlieIP: ip, Signature: nil,
 	}
-	enc, err := EncodeRelayResponse(resp)
-	require.NoError(t, err)
-	dec2, err := DecodeRelayResponse(enc)
-	require.NoError(t, err)
-	assert.Equal(t, byte(128), dec2.Code)
-	assert.Nil(t, dec2.Signature)
+	_, err = EncodeRelayResponse(resp)
+	require.Error(t, err, "encoder must reject a signature-less code>=64 rejection")
+	assert.Contains(t, err.Error(), "signature must be 64 bytes")
 }
 
 func TestRelayResponse_CharlieRejectionTruncatedSigRejected(t *testing.T) {
@@ -302,12 +306,65 @@ func TestRelayResponse_CharlieRejectionTruncatedSigRejected(t *testing.T) {
 	require.Error(t, err, "a truncated (partial) signature must still be rejected")
 }
 
+// TestRelayResponse_CharlieRejectionI2pdShape certifies the shape i2pd actually
+// emits for a non-accept RelayResponse: csz=0 (the endpoint is computed only for
+// code==accept) plus a full signature, no token. i2pd's CreateRelayResponseBlock
+// writes flag, code, nonce, ts, ver=2, csz, then signs (and appends a token only
+// when code==0) — i2pd/libi2pd/SSU2Session.cpp:3103-3155 (:3111 ver, :3128 csz,
+// :3143 sign, :3145-3151 token only when !code). For code 128 that is a 76-byte
+// body: flag(1)+code(1)+nonce(4)+ts(4)+ver(1)+csz(1)+sig(64).
+func TestRelayResponse_CharlieRejectionI2pdShape(t *testing.T) {
+	nonce := uint32(0x11223344)
+	ts := uint32(time.Now().Unix())
+	sig := make([]byte, 64)
+	for i := range sig {
+		sig[i] = byte(i)
+	}
+
+	// Hand-build the exact i2pd wire body (csz=0, signed, no token) —
+	// i2pd/libi2pd/SSU2Session.cpp:3103-3155.
+	data := make([]byte, 0, 76)
+	data = append(data, 0x00, 128) // flag, code=128
+	data = binary.BigEndian.AppendUint32(data, nonce)
+	data = binary.BigEndian.AppendUint32(data, ts)
+	data = append(data, 2, 0) // ver=2, csz=0 (no endpoint)
+	data = append(data, sig...)
+	require.Len(t, data, 76)
+
+	// The decoder must read the populated signature and no token.
+	decoded, err := DecodeRelayResponse(NewSSU2Block(BlockTypeRelayResponse, data))
+	require.NoError(t, err)
+	assert.Equal(t, byte(128), decoded.Code)
+	require.NotNil(t, decoded.Signature, "i2pd shape carries a signature")
+	assert.Equal(t, sig, decoded.Signature)
+	assert.Nil(t, decoded.Token, "no token for a non-accept response")
+	assert.Equal(t, byte(2), decoded.Version)
+	assert.Zero(t, decoded.CharliePort, "csz=0 carries no endpoint")
+	assert.Nil(t, decoded.CharlieIP)
+
+	// The encoder must produce those exact bytes for the same logical response
+	// (CharlieIP nil => csz=0), byte-for-byte — not merely a round-trip.
+	resp := &RelayResponseBlock{
+		Flag: 0, Code: 128, Nonce: nonce, Timestamp: ts,
+		Version: 2, CharlieIP: nil, Signature: sig,
+	}
+	enc, err := EncodeRelayResponse(resp)
+	require.NoError(t, err)
+	assert.Equal(t, data, enc.Data, "encoder must emit the exact i2pd shape")
+}
+
 // ---------------------------------------------------------------------------
-// PATH-006: PeerTest msgs 2/4 router hash is optional
+// PATH-006: PeerTest msgs 2/4 router hash — decode-only leniency for the
+// hash-less form. The spec always includes the hash for messages 2 and 4; the
+// only msg-4 variant it permits is an ALL-ZEROS hash on a Bob reject
+// (ssu2.md:2604-2607). i2pd always includes the field
+// (i2pd/libi2pd/SSU2Session.cpp:2464, :2495, :2508-2510), and our encoder never
+// emits a hash-less 2/4 (EncodePeerTestBlock requires RouterHash for those). The
+// hash-less decode path is therefore a defensive leniency, not spec compliance.
 // ---------------------------------------------------------------------------
 
 // buildPeerTestRaw assembles PeerTest wire bytes with an optional 32-byte router
-// hash, so the hash-less variant i2pd emits can be exercised.
+// hash, so the hash-less decode-only leniency can be exercised.
 func buildPeerTestRaw(msg PeerTestMessageCode, code byte, withHash bool, ip net.IP, hash []byte, sig []byte) []byte {
 	var data []byte
 	data = append(data, byte(msg), code, 0x00) // msg, code, flag
@@ -334,7 +391,8 @@ func TestPeerTest_HashlessVariantDecodes(t *testing.T) {
 	ip := net.ParseIP("203.0.113.95")
 	sig := make([]byte, 64)
 
-	// Message 2 (Relay) WITHOUT a router hash — the spec-permitted variant.
+	// Message 2 (Relay) WITHOUT a router hash — a decode-only leniency (the spec
+	// always includes the hash for message 2; no known sender omits it).
 	hashless := buildPeerTestRaw(PeerTestRelay, 0, false, ip, nil, sig)
 	b2, err := DecodePeerTestBlock(NewSSU2Block(BlockTypePeerTest, hashless))
 	require.NoError(t, err, "hash-less message 2 must decode (PATH-006)")
@@ -355,11 +413,41 @@ func TestPeerTest_HashlessMessage4Decodes(t *testing.T) {
 	ip := net.ParseIP("203.0.113.96")
 	sig := make([]byte, 64)
 
-	// Message 4 (Result) hash-less, accepted (code 0).
+	// Message 4 (Result) hash-less, accepted (code 0) — a decode-only leniency.
+	// The spec-permitted msg-4 form is the field PRESENT (all-zeros on a Bob
+	// reject), not absent; see TestPeerTest_Msg4BobRejectZeroHashDecodes.
 	hashless := buildPeerTestRaw(PeerTestResult, 0, false, ip, nil, sig)
 	b4, err := DecodePeerTestBlock(NewSSU2Block(BlockTypePeerTest, hashless))
 	require.NoError(t, err, "hash-less message 4 must decode (PATH-006)")
 	assert.Nil(t, b4.RouterHash)
+}
+
+// TestPeerTest_Msg4BobRejectZeroHashDecodes certifies the SPEC shape for a
+// message 4 Bob-reject: the router hash field is PRESENT and all-zeros
+// (ssu2.md:2604-2607 "All zeros (fake hash) in message 4 if rejected by Bob").
+// This is the frame i2pd emits (i2pd/libi2pd/SSU2Session.cpp:2508-2510 passes a
+// 32-byte zeroHash for the msg-4 Bob-reject). The encoder must emit the hash
+// field and the decoder must accept the all-zeros hash.
+func TestPeerTest_Msg4BobRejectZeroHashDecodes(t *testing.T) {
+	b := makePeerTestBlock(PeerTestResult)
+	b.Code = 2 // rejected by Bob, no Charlie available (code 1-63)
+	var zero data.Hash
+	b.RouterHash = &zero
+
+	enc, err := EncodePeerTestBlock(b)
+	require.NoError(t, err)
+	// msg(1)+code(1)+flag(1)+hash(32)+ver(1)+nonce(4)+ts(4)+asz(1)+port(2)+ip(4)+sig(64) = 115
+	require.Len(t, enc.Data, 115, "encoder must include the 32-byte hash field")
+	// The 32 hash bytes (offset 3..34) must all be zero.
+	for _, x := range enc.Data[3:35] {
+		assert.Equal(t, byte(0), x, "msg-4 Bob-reject hash field must be all zeros")
+	}
+
+	dec, err := DecodePeerTestBlock(enc)
+	require.NoError(t, err, "all-zeros msg-4 Bob-reject hash must decode")
+	require.NotNil(t, dec.RouterHash)
+	assert.Equal(t, zero, *dec.RouterHash)
+	assert.Equal(t, byte(2), dec.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -590,7 +678,7 @@ func TestReplayCache_ConcurrentSetMaxNoRaceNoPanic(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for i := 0; i < rounds; i++ {
-				_ = c.checkAndRecord(string(rune('a' + (i%26) + id)))
+				_ = c.checkAndRecord(string(rune('a' + (i % 26) + id)))
 			}
 		}(r)
 	}
@@ -618,7 +706,7 @@ func BenchmarkReplayCache_CheckAndRecord(b *testing.B) {
 	// capacity and every op evicts. Key building is excluded from the timing.
 	pool := make([]string, max*2)
 	for i := range pool {
-		pool[i] = string(rune('A' + i%26)) + string(rune('a'+(i/26)%26)) +
+		pool[i] = string(rune('A'+i%26)) + string(rune('a'+(i/26)%26)) +
 			string(rune('0'+(i/676)%10)) + itoa(i)
 	}
 

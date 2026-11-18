@@ -137,7 +137,7 @@ func NewRelayManager(listener ListenerRef) *RelayManager {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "NewRelayManager"}).Debug("Creating new RelayManager")
 	rm := &RelayManager{
 		listener:        listener,
-		introducers:     make([]*IntroducerInfo, 0, 3), // I2P spec allows up to 3
+		introducers:     make([]*IntroducerInfo, 0, 3), // up to 3 introducers (ssu2.md:3742 iexp[0-2])
 		relayTags:       make(map[uint32]*RelayTag),
 		pendingSessions: make(map[uint64]*PendingSession),
 		relayTagsMax:    DefaultRelayTagsMax,

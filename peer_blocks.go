@@ -224,14 +224,26 @@ func DecodePeerTestBlock(ssu2Block *SSU2Block) (*PeerTestBlock, error) {
 		return nil, oops.Errorf("reject code %d not allowed in PeerTest message %d (only messages 3 and 4 may carry a reject code)", block.Code, block.MessageCode)
 	}
 
-	// PATH-006 fix: the 32-byte router hash for messages 2 and 4 is OPTIONAL. The
-	// SSU2 spec permits the "same signed data without the hash" variant that i2pd
-	// emits, so the decoder must accept both forms. For messages 1-4 the signature
-	// is a mandatory trailing 64 bytes, so the router-hash presence is uniquely
+	// DECODE-ONLY LENIENCY (PATH-006): the decoder also accepts a message 2 or 4
+	// with NO 32-byte router hash. This is NOT a spec-permitted shape and NOT what
+	// i2pd emits. The spec always includes the hash for messages 2 and 4, and the
+	// only msg-4 variant it permits is an ALL-ZEROS hash when rejected by Bob
+	// (ssu2.md:2562-2570 "Alice router hash (message 2 only) ... Charlie router
+	// hash (message 4 only) ... or all zeros if rejected by Bob"; ssu2.md:2604-2607
+	// "hash :: ... only present in messages 2 and 4. All zeros (fake hash) in
+	// message 4 if rejected by Bob."). i2pd always includes the field for 2/4
+	// (i2pd/libi2pd/SSU2Session.cpp:2464 "offset += 32; // hash is presented for
+	// msg 2 and 4 only", :2495 identhash for msg 2, :2508-2510 zeroHash for the
+	// msg-4 Bob-reject). Our own encoder never emits a hash-less 2/4 either
+	// (EncodePeerTestBlock requires RouterHash for those messages).
+	//
+	// The leniency is kept defensively: it costs nothing on the wire and avoids
+	// dropping a peer that omits a field no known sender produces. For messages 1-4
+	// the signature is a mandatory trailing 64 bytes, so hash presence is uniquely
 	// determined by the remaining length: with a hash the tail is
 	// 32 + signedFields + 64, without it the tail is signedFields + 64 (signedFields
-	// is 16 for IPv4 / 28 for IPv6). These four totals are distinct, so we can
-	// decide deterministically instead of guessing from a byte value.
+	// is 16 for IPv4 / 28 for IPv6). These four totals are distinct, so presence is
+	// decided deterministically instead of guessed from a byte value.
 	if block.hasRouterHash() {
 		off = block.decodeRouterHashOptional(rawData, off)
 	}
@@ -274,14 +286,17 @@ func DecodePeerTestBlock(ssu2Block *SSU2Block) (*PeerTestBlock, error) {
 	return block, nil
 }
 
-// decodeRouterHashOptional reads the 32-byte router hash for messages 2 and 4,
-// which is optional per the SSU2 spec (the "same signed data without hash"
-// variant is permitted). It decides presence from the remaining byte count:
+// decodeRouterHashOptional reads the 32-byte router hash for messages 2 and 4.
+// The spec always includes this hash for messages 2 and 4 (the only msg-4
+// variant it permits is an all-zeros hash on a Bob reject, ssu2.md:2604-2607);
+// this function additionally tolerates its ABSENCE as a decode-only leniency
+// against a frame no known sender produces (see the rationale at the call site
+// in DecodePeerTestBlock). It decides presence from the remaining byte count:
 // the trailing signature is a mandatory 64 bytes for these messages, and the
 // signed fields are 16 (IPv4) or 28 (IPv6) bytes, so a tail of
 // 32+16+64 / 32+28+64 means a hash is present and 16+64 / 28+64 means absent.
 // Returns the updated offset (unchanged when no hash is present).
-// PATH-006 fix.
+// PATH-006.
 func (b *PeerTestBlock) decodeRouterHashOptional(rawData []byte, off int) int {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "decodeRouterHashOptional", "msg": b.MessageCode, "offset": off, "dataLen": len(rawData)}).Debug("Decoding optional router hash")
 	// Bytes after the (optional) hash: signedFields + mandatory 64-byte signature.

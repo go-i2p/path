@@ -30,3 +30,8 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# The user's global gitignore excludes *.sh, but scripts/ holds repo tooling
+# that CI depends on (e.g. check-oracle-claims.sh). Re-include it here so the
+# scripts are committed regardless of the global ignore.
+!scripts/*.sh

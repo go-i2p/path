@@ -98,8 +98,10 @@ type RelayResponseBlock struct {
 	// Present when Code == 0 or Code >= 64 with csz > 0.
 	CharlieIP net.IP
 
-	// Signature is the variable-length signature (typically 64 bytes for Ed25519).
-	// Present when Code == 0 or Code >= 64.
+	// Signature is Charlie's signature over the response (64 bytes for Ed25519).
+	// Present when Code == 0 or Code >= 64. The encoder requires a full 64-byte
+	// signature for both; the decoder additionally tolerates a signature-less
+	// rejection (nil) as a leniency — see decodeRelayResponseCharlieRejection.
 	Signature []byte
 
 	// Token is the 8-byte session request token from Charlie.
@@ -269,11 +271,17 @@ func DecodeRelayRequest(block *SSU2Block) (*RelayRequestBlock, error) {
 //   - 128: reject, source and reason unspecified.
 //   - 129-255: other reject codes TBD.
 //
-// Per the spec's signature section, "If Charlie agrees (response code 0) or
+// Per the spec's signature section (ssu2.md:2454), "If Charlie agrees (response code 0) or
 // rejects (response code 64 or higher), Charlie signs the response". Codes
 // 128-255 therefore use the same wire layout as the 64-127 Charlie-rejection
 // range (Timestamp, Ver, Csz, endpoint, Charlie signature); they are
 // semantically a distinct "reject, source and reason unspecified" category.
+//
+// The encoder always emits that signed layout for code >= 64: Signature must be
+// a full 64-byte Ed25519 signature, and a nil or short signature is an error.
+// A signature-less rejection is accepted only on the decode side as a
+// leniency (see decodeRelayResponseCharlieRejection); it is never produced
+// here, because the spec requires the signature for every code >= 64.
 func EncodeRelayResponse(resp *RelayResponseBlock) (*SSU2Block, error) {
 	if resp == nil {
 		return nil, oops.Errorf("RelayResponseBlock is nil")
@@ -333,6 +341,13 @@ func encodeRelayResponseAccepted(resp *RelayResponseBlock) (*SSU2Block, error) {
 
 func encodeRelayResponseCharlieRejection(resp *RelayResponseBlock) (*SSU2Block, error) {
 	log.WithFields(logger.Fields{"pkg": "ssu2", "func": "encodeRelayResponseCharlieRejection", "code": resp.Code, "nonce": resp.Nonce}).Debug("Encoding Charlie rejection response")
+	// SSU2 spec (Relay Response, Notes): "If Charlie agrees (response code 0) or
+	// rejects (response code 64 or higher), Charlie signs the response and
+	// includes it in this block." So every code >= 64 carries Charlie's
+	// signature; the encoder must not produce a signature-less rejection.
+	if len(resp.Signature) != 64 {
+		return nil, oops.Errorf("signature must be 64 bytes for Ed25519, got %d", len(resp.Signature))
+	}
 	ipBytes, csz, err := normalizeIP(resp.CharlieIP)
 	if err != nil {
 		return nil, oops.Wrapf(err, "invalid CharlieIP")
@@ -393,6 +408,12 @@ func DecodeRelayResponse(block *SSU2Block) (*RelayResponseBlock, error) {
 	} else if resp.Code >= 64 && len(data) > 6 {
 		return decodeRelayResponseCharlieRejection(resp, data)
 	}
+	// DECODE-ONLY LENIENCY: a code >= 64 body of exactly 6 bytes (Flag/Code/Nonce
+	// only) falls through here as a minimal block with no Timestamp/Ver/Csz/
+	// signature. i2pd never emits this — it always writes ts/ver/csz and signs for
+	// every code (i2pd/libi2pd/SSU2Session.cpp:3111, :3128, :3143) — so this is a
+	// defensive acceptance, not a spec shape. Codes 1-63 (Bob rejection) legitimately
+	// carry only Flag/Code/Nonce and return here by design.
 	return resp, nil
 }
 
@@ -449,15 +470,29 @@ func decodeRelayResponseCharlieRejection(resp *RelayResponseBlock, data []byte) 
 	if err != nil {
 		return nil, err
 	}
-	// PATH-005 fix: the Charlie signature is normally 64 bytes (Ed25519), but the
-	// spec permits a compact "reject, source and reason unspecified" (code 128)
-	// with NO signature — the form i2pd emits. Accept both: read the signature
-	// when a full 64 bytes remain, accept a signature-less rejection when nothing
-	// remains, and reject only a truncated (partial) signature.
+	// DECODE-ONLY LENIENCY (PATH-005): a code >= 64 rejection with NO signature
+	// (nothing remaining after the endpoint) is accepted here with Signature nil.
+	//
+	// This is NOT a spec-permitted shape and NOT what i2pd emits. The spec
+	// requires Charlie to sign every code >= 64 (ssu2.md:2454 "If Charlie agrees
+	// (response code 0) or rejects (response code 64 or higher), Charlie signs
+	// the response and includes it in this block"), and i2pd always appends the
+	// signature and always writes ts/ver/csz for every code, including 128
+	// (i2pd/libi2pd/SSU2Session.cpp:3111 buf[13]=2 ver, :3128 buf[14]=csz, :3143
+	// s.Sign(..., buf+15+csz)). i2pd merely tolerates a signature-less rejection
+	// on receive because it verifies the RelayResponse signature only when
+	// code == 0 (i2pd/libi2pd/SSU2Session.cpp:2408 if (!buf[1])) and leaves the
+	// hole-punch signature as an open TODO (i2pd/libi2pd/SSU2Session.cpp:2369).
+	//
+	// We keep the leniency defensively: reading a signature-less rejection costs
+	// nothing on the wire (the encoder never produces it) and avoids dropping an
+	// interoperating peer that omits the signature. Read the signature when a
+	// full 64 bytes remain, accept nil when nothing remains, and reject only a
+	// truncated (partial) signature.
 	remaining := len(data) - off
 	switch {
 	case remaining == 0:
-		// Signature-less rejection (e.g. i2pd's compact code-128). Leave Signature nil.
+		// Signature-less rejection accepted as a leniency (see above). Leave Signature nil.
 	case remaining >= 64:
 		resp.Signature = make([]byte, 64)
 		copy(resp.Signature, data[off:off+64])

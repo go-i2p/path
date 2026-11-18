@@ -55,5 +55,13 @@ jobs:
             exit 1
           fi
 
+      # PA-008 citation-integrity guard: every comment asserting what i2pd or
+      # the spec does/permits must carry a resolvable file:line citation. The
+      # reference sources (ssu2.md, i2pd) are not checked out here, so the
+      # best-effort line-range check is skipped in CI; the citation-format check
+      # (the anti-poisoning guard) still runs and fails on an uncited claim.
+      - name: Check oracle-claim citations
+        run: ./scripts/check-oracle-claims.sh
+
       - name: Test
         run: go test -race -count=1 ./...

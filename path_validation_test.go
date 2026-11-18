@@ -221,7 +221,7 @@ func TestPathValidator_MTUProbeIsSingleBlock(t *testing.T) {
 
 // TestPathValidator_WantACKFlag verifies the wantACK flag path validation
 // passes to the connection: true for a Path Challenge and Path Response (which
-// the spec says typically carry an ACK), false for a PMTU probe (whose
+// the spec says are ACK-eliciting, ssu2.md:3272), false for a PMTU probe (whose
 // datagram size must be exact). Also verifies a connection contributing ACK
 // blocks lands them in the same packet.
 func TestPathValidator_WantACKFlag(t *testing.T) {
